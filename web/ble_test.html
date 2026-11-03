@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StickS3 BLE Test</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #171b22;
+    --border: #262c36;
+    --text: #e6e9ef;
+    --muted: #7d8590;
+    --dim: #3a414c;
+    --ok: #4fa3ff;
+    --err: #ff5c5c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+    margin-bottom: 16px;
+  }
+  h1 { font-size: 18px; margin: 0; flex: 1 1 auto; }
+  button {
+    background: var(--ok); color: #fff; border: 0; border-radius: 8px;
+    padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: .5; cursor: default; }
+
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px;
+    margin-bottom: 16px;
+  }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  .stat .label { color: var(--muted); font-size: 12px; }
+  .stat .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .value.ok { color: var(--ok); }
+  .value.err { color: var(--err); }
+
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 16px; }
+  @media (min-width: 640px) { .tiles { grid-template-columns: repeat(6, 1fr); } }
+  .tile {
+    position: relative; border: 1px solid var(--dim); border-radius: 10px;
+    height: 64px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: var(--dim); font-weight: 600; transition: background-color .25s, color .25s, border-color .25s;
+  }
+  .tile .detail { font-size: 12px; font-weight: 500; min-height: 16px; }
+  .tile .count {
+    position: absolute; top: 4px; right: 7px; font-size: 11px; font-weight: 500;
+    color: var(--muted); font-variant-numeric: tabular-nums;
+  }
+  .tile.lit { color: #000; border-color: transparent; transition: none; }
+  .tile.lit .count { color: rgba(0,0,0,.6); }
+
+  .log {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    height: 280px; overflow-y: auto; padding: 8px 12px;
+    font: 12px/1.6 ui-monospace, Consolas, monospace;
+  }
+  .log div { white-space: pre; }
+  .log .sys { color: var(--muted); }
+  .log .warn { color: var(--err); }
+  .hint { color: var(--muted); font-size: 13px; }
+  #unsupported { display: none; background: #3a1d1d; border: 1px solid #6b2a2a; border-radius: 10px; padding: 12px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>StickS3 BLE: тест событий</h1>
+    <button id="connect">Подключить</button>
+    <button id="reel" class="secondary" disabled>Катушка: выкл</button>
+    <button id="mic" class="secondary" disabled>Микрофон: выкл</button>
+    <button id="disconnect" class="secondary" disabled>Отключить</button>
+    <button id="clear" class="secondary">Очистить</button>
+  </header>
+
+  <div id="unsupported">
+    Web Bluetooth недоступен в этом браузере. Откройте страницу в Chrome или Edge
+    (Windows / Android / macOS). Если открыта как файл и не работает — запустите
+    <code>python -m http.server</code> в папке <code>web</code> и откройте <code>http://localhost:8000/ble_test.html</code>.
+  </div>
+
+  <section class="stats">
+    <div class="stat"><div class="label">Статус</div><div class="value" id="status">нет связи</div></div>
+    <div class="stat"><div class="label">Батарея</div><div class="value" id="battery">—</div></div>
+    <div class="stat"><div class="label">Пакетов</div><div class="value" id="packets">0</div></div>
+    <div class="stat"><div class="label">Потеряно</div><div class="value" id="lost">0</div></div>
+    <div class="stat"><div class="label">Время стика</div><div class="value" id="uptime">—</div></div>
+    <div class="stat"><div class="label">Катушка, об/с</div><div class="value" id="reelSpeed">—</div></div>
+    <div class="stat"><div class="label">Оборотов</div><div class="value" id="reelTurns">—</div></div>
+    <div class="stat"><div class="label">Выдохов (BLOW)</div><div class="value" id="blows">0</div></div>
+  </section>
+
+  <section class="tiles" id="tiles"></section>
+
+  <div class="log" id="log"></div>
+  <p class="hint">Плитка горит 1.5 с после события, цифра в углу — сколько раз событие пришло.</p>
+</main>
+
+<script>
+// Должно совпадать с прошивкой (StickS3_BMI270_events.ino)
+const SERVICE_UUID = 'b5e10001-6d2a-4c8e-9f3b-1a7c5e2d9f40';
+const EVENT_UUID   = 'b5e10002-6d2a-4c8e-9f3b-1a7c5e2d9f40';
+const CMD_UUID     = 'b5e10003-6d2a-4c8e-9f3b-1a7c5e2d9f40';   // команды: 1 - катушка вкл, 0 - выкл
+const STATE_PACKET = 0xFF;
+const HIGHLIGHT_MS = 1500;
+
+// Порядок = EventId в прошивке
+const EVENTS = [
+  { name: 'TAP x1',   color: '#ffffff' },
+  { name: 'TAP x2',   color: '#ffd700' },
+  { name: 'TAP x3',   color: '#ffc0cb' },
+  { name: 'ANY MOT',  color: '#ffa500' },
+  { name: 'NO MOT',   color: '#00ffff' },
+  { name: 'SIG MOT',  color: '#ff3b3b' },
+  { name: 'HIGH-G',   color: '#ff00ff' },
+  { name: 'LOW-G',    color: '#bb00ff' },
+  { name: 'FLAT',     color: '#87ceeb' },
+  { name: 'ORIENT',   color: '#b4ff2f' },
+  { name: 'REEL',     color: '#00e070' },
+  { name: 'BLOW',     color: '#ffe000' },
+];
+const ORIENT_NAMES = ['PORT UP', 'LAND L', 'PORT DN', 'LAND R'];
+const EV_HIGH_G = 6, EV_FLAT = 8, EV_ORIENT = 9, EV_REEL = 10, EV_BLOW = 11;
+
+function decodeDetail(id, code) {
+  if (id === EV_FLAT)     return code ? 'ON' : 'OFF';
+  if (id === EV_ORIENT)   return ORIENT_NAMES[code & 3];
+  if (id === EV_HIGH_G)   return 'XYZ?'[code & 3] + (code & 0x80 ? '-' : '+');
+  if (id === EV_REEL)     return code ? (code / 10).toFixed(1) + ' об/с' : 'стоп';
+  if (id === EV_BLOW)     return code ? 'сила ' + code : 'конец';
+  return '';
+}
+
+// ---------- UI ----------
+const $ = (id) => document.getElementById(id);
+const tilesEl = $('tiles');
+const tiles = EVENTS.map((ev) => {
+  const el = document.createElement('div');
+  el.className = 'tile';
+  el.innerHTML = `<span class="count">0</span><span class="name"></span><span class="detail"></span>`;
+  el.querySelector('.name').textContent = ev.name;
+  tilesEl.appendChild(el);
+  return { el, count: 0, timer: 0 };
+});
+
+function lightTile(id, detail) {
+  const t = tiles[id];
+  t.count++;
+  t.el.querySelector('.count').textContent = t.count;
+  t.el.querySelector('.detail').textContent = detail;
+  t.el.classList.add('lit');
+  t.el.style.backgroundColor = EVENTS[id].color;
+  clearTimeout(t.timer);
+  t.timer = setTimeout(() => {
+    t.el.classList.remove('lit');
+    t.el.style.backgroundColor = '';
+  }, HIGHLIGHT_MS);
+}
+
+function log(text, cls) {
+  const logEl = $('log');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
+  logEl.prepend(line);
+  while (logEl.childElementCount > 300) logEl.lastChild.remove();
+}
+
+function setStatus(text, cls) {
+  const el = $('status');
+  el.textContent = text;
+  el.className = 'value' + (cls ? ' ' + cls : '');
+}
+
+let packets = 0, lost = 0, lastSeq = null;
+
+function resetCounters() {
+  packets = 0; lost = 0; lastSeq = null;
+  $('packets').textContent = '0';
+  $('lost').textContent = '0';
+  blowCount = 0;
+  $('blows').textContent = '0';
+  tiles.forEach((t) => { t.count = 0; t.el.querySelector('.count').textContent = '0'; });
+  $('log').innerHTML = '';
+}
+
+// ---------- BLE ----------
+let device = null;
+
+function onEvent(e) {
+  const dv = e.target.value;
+  if (dv.byteLength < 12) { log(`короткий пакет: ${dv.byteLength} байт`, 'warn'); return; }
+  const id = dv.getUint8(0), code = dv.getUint8(1), seq = dv.getUint8(2);
+  const t = dv.getUint32(4, true);
+  const extra = dv.getUint16(8, true);   // у REEL - обороты x100, байты 10..11 - резерв
+
+  packets++;
+  $('packets').textContent = packets;
+  $('uptime').textContent = (t / 1000).toFixed(1) + ' с';
+
+  // У пакета состояния номер не учитывается; дырка в нумерации событий -
+  // событие потерялось на стике (переполнилась BLE-очередь) или в эфире
+  if (id === STATE_PACKET) { lastSeq = null; log(`состояние: ${code ? 'лежит' : 'в руке'}`, 'sys'); return; }
+  if (lastSeq !== null) {
+    const gap = (seq - lastSeq - 1 + 256) & 0xFF;
+    if (gap) { lost += gap; log(`пропущено событий: ${gap}`, 'warn'); }
+  }
+  lastSeq = seq;
+  $('lost').textContent = lost;
+  $('lost').className = 'value' + (lost ? ' err' : '');
+  if (id >= EVENTS.length) { log(`неизвестное событие id=${id}`, 'warn'); return; }
+
+  const detail = decodeDetail(id, code);
+  lightTile(id, detail);
+  if (id === EV_REEL) {
+    // REEL приходит 10 раз в секунду - в лог пишем только остановку
+    $('reelSpeed').textContent = (code / 10).toFixed(1);
+    $('reelTurns').textContent = (extra / 100).toFixed(1);
+    if (code) return;
+  }
+  if (id === EV_BLOW && code) $('blows').textContent = ++blowCount;
+  log(`#${String(seq).padStart(3)}  t=${String(t).padStart(8)}  ${EVENTS[id].name}${detail ? ' (' + detail + ')' : ''}`);
+}
+
+function onBattery(e) {
+  $('battery').textContent = e.target.value.getUint8(0) + '%';
+}
+
+// ---------- Катушка и микрофон ----------
+let cmdChar = null, reelOn = false, micOn = false, blowCount = 0;
+
+// Микрофон: команда 3 - включить, 2 - выключить. Пока включён, стик шлёт BLOW, когда в него дуют
+async function setMic(on) {
+  if (!cmdChar) return;
+  try {
+    await cmdChar.writeValueWithoutResponse(Uint8Array.of(on ? 3 : 2));
+    micOn = on;
+    $('mic').textContent = 'Микрофон: ' + (on ? 'вкл' : 'выкл');
+    $('mic').className = on ? '' : 'secondary';
+    log(on ? 'микрофон включён: подуйте в стик' : 'микрофон выключен', 'sys');
+  } catch (err) {
+    log('команда не ушла: ' + err.message, 'warn');
+  }
+}
+
+async function setReel(on) {
+  if (!cmdChar) return;
+  try {
+    await cmdChar.writeValueWithoutResponse(Uint8Array.of(on ? 1 : 0));
+    reelOn = on;
+    $('reel').textContent = 'Катушка: ' + (on ? 'вкл' : 'выкл');
+    $('reel').className = on ? '' : 'secondary';
+    log(on ? 'катушка включена: крутите стик кистью' : 'катушка выключена', 'sys');
+  } catch (err) {
+    log('команда не ушла: ' + err.message, 'warn');
+  }
+}
+
+function onDisconnected() {
+  cmdChar = null; reelOn = false; micOn = false;
+  $('reel').disabled = true;
+  $('mic').disabled = true;
+  $('mic').textContent = 'Микрофон: выкл';
+  $('mic').className = 'secondary';
+  $('reel').textContent = 'Катушка: выкл';
+  $('reel').className = 'secondary';
+  setStatus('отключён', 'err');
+  log('соединение разорвано', 'warn');
+  $('connect').disabled = false;
+  $('disconnect').disabled = true;
+}
+
+async function connect() {
+  try {
+    $('connect').disabled = true;
+    setStatus('поиск…');
+    if (!device) {
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [SERVICE_UUID] }],
+        optionalServices: ['battery_service'],
+      });
+      device.addEventListener('gattserverdisconnected', onDisconnected);
+    }
+    setStatus('подключение…');
+    const server = await device.gatt.connect();
+
+    const svc = await server.getPrimaryService(SERVICE_UUID);
+    const evtChar = await svc.getCharacteristic(EVENT_UUID);
+    evtChar.addEventListener('characteristicvaluechanged', onEvent);
+    await evtChar.startNotifications();
+
+    try {
+      cmdChar = await svc.getCharacteristic(CMD_UUID);
+      $('reel').disabled = false;
+      $('mic').disabled = false;
+    } catch (err) {
+      cmdChar = null;
+      log('катушки нет: старая прошивка', 'sys');
+    }
+
+    try {
+      const bat = await (await server.getPrimaryService('battery_service')).getCharacteristic('battery_level');
+      bat.addEventListener('characteristicvaluechanged', onBattery);
+      onBattery({ target: { value: await bat.readValue() } });
+      await bat.startNotifications();
+    } catch (err) {
+      log('батарея недоступна: ' + err.message, 'sys');
+    }
+
+    lastSeq = null;
+    setStatus(device.name || 'подключён', 'ok');
+    log(`подключено к ${device.name || device.id}`, 'sys');
+    $('disconnect').disabled = false;
+  } catch (err) {
+    setStatus('ошибка', 'err');
+    log('ошибка: ' + err.message, 'warn');
+    $('connect').disabled = false;
+  }
+}
+
+$('connect').addEventListener('click', connect);
+$('disconnect').addEventListener('click', () => { if (device && device.gatt.connected) device.gatt.disconnect(); });
+$('clear').addEventListener('click', resetCounters);
+$('reel').addEventListener('click', () => setReel(!reelOn));
+$('mic').addEventListener('click', () => setMic(!micOn));
+
+if (!navigator.bluetooth) {
+  $('unsupported').style.display = 'block';
+  $('connect').disabled = true;
+}
+</script>
+</body>
+</html>

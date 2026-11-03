@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pixel Fishing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Press+Start+2P&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="stage">
+  <canvas id="game" width="320" height="180"></canvas>
+  <canvas id="hud"></canvas>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="card">
+    <!-- Заголовок, текст и кнопки заполняет js/menu.js на выбранном языке -->
+    <h1 id="overlayTitle"></h1>
+    <p id="overlayText"></p>
+    <div id="overlayButtons"></div>
+    <div id="overlayStatus"></div>
+  </div>
+</div>
+
+<!--
+  Порядок подключения важен: каждый файл может пользоваться тем, что объявлено в файлах выше.
+  Что за что отвечает - см. README.md в этой папке.
+-->
+<script src="js/config.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/render.js"></script>
+<script src="js/sprites.js"></script>
+<script src="js/scene.js"></script>
+<script src="js/fisher.js"></script>
+<script src="js/effects.js"></script>
+<script src="js/sound.js"></script>
+<script src="js/daytime.js"></script>
+<script src="js/ambience.js"></script>
+<script src="js/fishzone.js"></script>
+<script src="js/floaters.js"></script>
+<script src="js/bait.js"></script>
+<script src="js/mosquito.js"></script>
+<script src="js/bucket.js"></script>
+<script src="js/campfire.js"></script>
+<script src="js/stick.js"></script>
+<script src="js/game.js"></script>
+<script src="js/states.js"></script>
+<script src="js/photo.js"></script>
+<script src="js/draw.js"></script>
+<script src="js/menu.js"></script>
+<script src="js/controller.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

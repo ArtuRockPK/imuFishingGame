@@ -1,0 +1,14 @@
+# Скомпилированные прошивки (Arduino IDE: Sketch -> Export Compiled Binary)
+build/
+
+# Старый архив игры
+web/fishing.zip
+
+# Настройки редактора и Claude Code
+.claude/
+.vscode/
+
+# Мусор ОС
+Thumbs.db
+desktop.ini
+.DS_Store
