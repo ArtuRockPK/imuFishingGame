@@ -163,7 +163,7 @@ const FISH_TYPES = [
 ];
 
 // ---------- Контроллер (BLE) ----------
-// Должно совпадать с прошивкой стика (StickS3_BMI270_events.ino)
+// Должно совпадать с прошивками (StickS3_BMI270_events, StickCPlus2_MPU6886_events, CardputerADV_BMI270_events)
 const BLE_SERVICE_UUID = 'b5e10001-6d2a-4c8e-9f3b-1a7c5e2d9f40';
 const BLE_EVENT_UUID   = 'b5e10002-6d2a-4c8e-9f3b-1a7c5e2d9f40';
 const BLE_CMD_UUID     = 'b5e10003-6d2a-4c8e-9f3b-1a7c5e2d9f40';   // команды стику: катушка вкл/выкл

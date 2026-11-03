@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StickS3 BLE Test</title>
+<title>M5 Rod BLE Test</title>
 <style>
   :root {
     --bg: #0e1116;
@@ -75,7 +75,7 @@
 <body>
 <main>
   <header>
-    <h1>StickS3 BLE: тест событий</h1>
+    <h1>Контроллер M5 (StickS3, StickC Plus2, Cardputer ADV): тест событий</h1>
     <button id="connect">Подключить</button>
     <button id="reel" class="secondary" disabled>Катушка: выкл</button>
     <button id="mic" class="secondary" disabled>Микрофон: выкл</button>
@@ -107,7 +107,7 @@
 </main>
 
 <script>
-// Должно совпадать с прошивкой (StickS3_BMI270_events.ino)
+// Должно совпадать с прошивками (StickS3_BMI270_events, StickCPlus2_MPU6886_events, CardputerADV_BMI270_events)
 const SERVICE_UUID = 'b5e10001-6d2a-4c8e-9f3b-1a7c5e2d9f40';
 const EVENT_UUID   = 'b5e10002-6d2a-4c8e-9f3b-1a7c5e2d9f40';
 const CMD_UUID     = 'b5e10003-6d2a-4c8e-9f3b-1a7c5e2d9f40';   // команды: 1 - катушка вкл, 0 - выкл

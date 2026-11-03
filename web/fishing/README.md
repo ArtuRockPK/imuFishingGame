@@ -1,8 +1,14 @@
 # Pixel Fishing — как устроена игра
 
-Браузерная 8-битная рыбалка, управляется стиком M5StickS3 по Bluetooth.
-Вместо стика можно взять M5Cardputer ADV с прошивкой `CardputerADV_BMI270_events`:
-протокол тот же, игра находит его так же (в списке он называется `Cardputer-Rod`).
+Браузерная 8-битная рыбалка, управляется контроллером M5 по Bluetooth. Подходит любой из трёх:
+
+| Устройство | Прошивка | Имя в списке Bluetooth |
+|---|---|---|
+| M5StickS3 | `StickS3_BMI270_events.ino` | `StickS3-Rod` |
+| M5StickC Plus2 | `StickCPlus2_MPU6886_events` | `StickCP2-Rod` |
+| M5Cardputer ADV | `CardputerADV_BMI270_events` | `Cardputer-Rod` |
+
+Протокол у всех одинаковый, игра находит их одинаково.
 
 ## Как запустить
 
