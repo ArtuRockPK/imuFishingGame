@@ -12,6 +12,12 @@ An 8-bit browser fishing game where the rod is an M5 controller with a motion se
 flick it to cast, jerk to hook, twist your wrist to turn the reel, and at night blow into
 the microphone to light a campfire. The controller sends its events to the game over Bluetooth.
 
+**Flash a controller in a couple of clicks** with the M5Burner web flasher (Chrome or Edge, USB cable):
+
+- Game firmware for **StickCPlus2** — https://burner.m5stack.com/EVRRG7
+- Game firmware for **CardputerADV** — https://burner.m5stack.com/K482U9
+- Game firmware for **StickS3** — https://burner.m5stack.com/share/firmware/X65WLT
+
 ### What's inside
 
 | Folder / file | What it is |
@@ -52,6 +58,12 @@ and open `http://localhost:8000/fishing/`. Without a controller you can play wit
 Браузерная 8-битная рыбалка. Удочка — контроллер M5 с датчиком движения:
 им забрасывают (рывок), подсекают, крутят катушку (вращение кистью), а ночью
 раздувают костёр (дуют в микрофон). Контроллер передаёт события в игру по Bluetooth.
+
+**Прошить контроллер за пару кликов** можно через веб-прошивальщик M5Burner (Chrome или Edge, USB-кабель):
+
+- Прошивка для игры на **StickCPlus2** — https://burner.m5stack.com/EVRRG7
+- Прошивка для игры на **CardputerADV** — https://burner.m5stack.com/K482U9
+- Прошивка для игры на **StickS3** — https://burner.m5stack.com/share/firmware/X65WLT
 
 ### Что в репозитории
 
