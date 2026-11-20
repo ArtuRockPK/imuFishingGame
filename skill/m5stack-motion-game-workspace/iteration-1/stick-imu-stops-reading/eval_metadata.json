@@ -1,0 +1,11 @@
+{
+  "eval_name": "stick-imu-stops-reading",
+  "prompt": "help pls. M5StickS3, I'm reading the BMI270 with the SparkFun lib: Wire.begin(47,48); imu.beginI2C(0x68, Wire). first few readings are fine then everything is zeros / errors forever. my loop calls M5.update() for the buttons. Also next I want proper single/double tap and orientation events from the sensor itself, not my own math. what's wrong and how should I do it?",
+  "assertions": [
+    "The answer identifies that M5Unified's internal I2C driver (M5.In_I2C) re-attaches pins 47/48 on its own transactions (e.g. during M5.update()), taking them away from Arduino Wire",
+    "The answer tells the user to access the BMI270 through M5.In_I2C (or M5Unified's own IMU access) instead of Wire on pins 47/48",
+    "The answer recommends the Bosch BMI270 legacy configuration (bmi270_legacy_*) for single/double tap and orientation, since the main config lacks them",
+    "The answer notes the SparkFun wrapper cannot load the legacy config, so the Bosch API bundled in it must be called directly",
+    "The answer provides code that maps features to an interrupt and reads events by polling the interrupt status register (and the tap status register for tap type)"
+  ]
+}

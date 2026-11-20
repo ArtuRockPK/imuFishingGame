@@ -1,0 +1,13 @@
+{
+  "eval_name": "spin-direction-feature",
+  "prompt": "My M5StickS3 already sends wrist-spin speed (rev/s) over BLE to my browser fishing game while the player reels in. Now I want a mini-game where the fish pulls left/right and the player has to spin clockwise to push right and counter-clockwise to push left. Problem: players hold the stick in all kinds of ways. How do I get spin direction on the stick and make it reliable in the game? Give me the firmware part and the JS part.",
+  "assertions": [
+    "The firmware computes spin direction as a sensor axis plus sign (e.g. from integrated gyro rotation and/or cross products of consecutive samples) and sends it in the BLE packet",
+    "The firmware handles both twisting around the device's own axis and circular wrist motion where the gyro vector rotates",
+    "The firmware reports when the direction is unknown/ambiguous (e.g. a confidence flag or threshold) rather than always guessing",
+    "The game learns which axis+sign means clockwise for this device and grip through a calibration step where the player spins in a known direction",
+    "The calibration result is stored per device (e.g. localStorage keyed by device name) so it is not repeated every session",
+    "The JS maps incoming direction to +1/-1/0 and the mini-game uses it to push the marker right/left",
+    "The solution includes keyboard keys for spinning clockwise and counter-clockwise so the mini-game can be tested without the stick"
+  ]
+}

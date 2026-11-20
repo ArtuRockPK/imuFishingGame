@@ -1,0 +1,5 @@
+schema_version: "1.1"
+name: stick-imu-stops-reading
+expected_outcome: |
+  Explains that M5Unified's M5.In_I2C takes pins 47/48 back from Wire on M5.update(), so the IMU must be
+  accessed through M5.In_I2C; recommends the Bosch BMI270 legacy config for taps/orientation, polled via the interrupt status.

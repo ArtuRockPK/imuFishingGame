@@ -1,0 +1,45 @@
+{
+  "expectations": [
+    {
+      "text": "The firmware computes spin direction as a sensor axis plus sign (e.g. from integrated gyro rotation and/or cross products of consecutive samples) and sends it in the BLE packet",
+      "passed": true,
+      "evidence": "signed rate along learned spin axis sent over BLE"
+    },
+    {
+      "text": "The firmware handles both twisting around the device's own axis and circular wrist motion where the gyro vector rotates",
+      "passed": false,
+      "evidence": "Projects gyro onto a learned axis: handles twist only; circular wrist motion where the gyro vector rotates is not handled"
+    },
+    {
+      "text": "The firmware reports when the direction is unknown/ambiguous (e.g. a confidence flag or threshold) rather than always guessing",
+      "passed": true,
+      "evidence": "quality 0..1 score, wobble ignored below 0.55"
+    },
+    {
+      "text": "The game learns which axis+sign means clockwise for this device and grip through a calibration step where the player spins in a known direction",
+      "passed": true,
+      "evidence": "\"spin clockwise for 2 s\" calibration"
+    },
+    {
+      "text": "The calibration result is stored per device (e.g. localStorage keyed by device name) so it is not repeated every session",
+      "passed": false,
+      "evidence": "single global localStorage key spinDir.calibration.v1, not per device"
+    },
+    {
+      "text": "The JS maps incoming direction to +1/-1/0 and the mini-game uses it to push the marker right/left",
+      "passed": true,
+      "evidence": "read() returns -1/0/1 and push; tug-minigame uses it"
+    },
+    {
+      "text": "The solution includes keyboard keys for spinning clockwise and counter-clockwise so the mini-game can be tested without the stick",
+      "passed": false,
+      "evidence": "no keyboard keys for CW/CCW testing"
+    }
+  ],
+  "summary": {
+    "passed": 4,
+    "failed": 3,
+    "total": 7,
+    "pass_rate": 0.57
+  }
+}

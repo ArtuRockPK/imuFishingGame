@@ -1,0 +1,14 @@
+{
+  "eval_name": "sword-game-stickcplus2",
+  "prompt": "I've got an M5StickC Plus2 and want to make a simple browser game where it's a sword: a sharp swing = slash, laying the stick flat on the table = pause, double tap on the case = special attack. Please write the Arduino firmware for the stick and a single-page web game (canvas, just a dummy enemy with HP is fine) that connects to it over Bluetooth. I'll flash it myself from Arduino IDE. I also want to test the game when I don't have the stick with me.",
+  "assertions": [
+    "The firmware detects gestures in software from the IMU (M5.Imu / MPU6886 accelerometer), since the MPU6886 has no on-chip gesture engine",
+    "The swing (slash) detector requires acceleration above a threshold for a minimum duration or uses a lockout, so a tap knock is not counted as a slash",
+    "Lay-flat detection uses hysteresis (separate on/off thresholds) or a hold time, and the event is sent only on state change",
+    "The firmware sends small named event packets (event id + code) over a BLE notify characteristic rather than streaming raw sensor data",
+    "Advertising puts the custom service UUID in the advertising data so the browser can filter by it",
+    "The web page connects with navigator.bluetooth.requestDevice filtered by the service UUID and subscribes to notifications",
+    "The web game has a keyboard mode that triggers the same events (slash, pause/flat, special attack) through the same handler as BLE",
+    "The answer tells the user which Arduino board and libraries to select (M5StickCPlus2 board, M5Unified) and that Web Bluetooth needs Chrome/Edge over HTTPS or localhost"
+  ]
+}

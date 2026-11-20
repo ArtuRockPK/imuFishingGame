@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stick Sword</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<!--
+  STICK SWORD — a tiny browser game played with an M5StickC Plus2 as a sword over Bluetooth LE.
+
+  Controls (stick / keyboard / touch buttons all go through the same onControllerEvent):
+    sharp swing          HIGH_G   H, Enter, or click the game   -> SLASH
+    double tap the case  TAP2     Space                         -> SPECIAL ATTACK (4 s cooldown)
+    button A             BTN      A                             -> spare special key
+    lay flat on table    FLAT 1/0 F (toggles)                   -> PAUSE / RESUME
+    G = show/hide the event log (works with the stick too: use it to tune thresholds)
+
+  Web Bluetooth works only in Chrome / Edge (desktop or Android) and only on https:// or
+  http://localhost. Keyboard/touch mode works everywhere, even opened as a local file.
+
+  File map (all in this one page):
+    CONFIG ......... every tunable number of the game
+    PROTOCOL / BLE . UUIDs + packet parsing — must match StickCP2_Sword.ino
+    INPUT .......... keyboard + touch buttons -> the same events as the stick
+    SOUND .......... WebAudio blips, no audio files
+    GAME ........... state, onControllerEvent, slash / special / pause, update()
+    DRAW ........... 320x180 pixel-art canvas
+    MENUS .......... the shared overlay card
+  Testing from the console: __test.pause(true) stops the loop, then
+    __test.ev(__test.EV.HIGH_G); __test.step(30); __test.draw();
+-->
+<style>
+  :root { --bg: #14121c; --card: #221e30; --ink: #f4ead8; --dim: #9a90b0; --accent: #ffcc33; --line: #3a3350; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font-family: "Press Start 2P", ui-monospace, monospace; }
+  body { display: flex; flex-direction: column; align-items: center; padding: 12px 16px; gap: 10px; }
+  #stage { position: relative; line-height: 0; }
+  #game { image-rendering: pixelated; image-rendering: crisp-edges; display: block;
+    border: 2px solid var(--line); background: #000; cursor: crosshair; touch-action: manipulation;
+    max-width: 100%; height: auto; }
+  @media (max-width: 520px) { .card h1 { font-size: 13px; } .card p { font-size: 8px; } button { font-size: 9px; } }
+  #overlay { position: fixed; inset: 0; padding: 16px; z-index: 5; display: flex; align-items: center; justify-content: center;
+    background: rgba(10, 8, 16, .72); line-height: 1.6; }
+  #overlay.hidden { display: none; }
+  .card { background: var(--card); border: 3px solid var(--accent); padding: 18px 20px; max-width: 92%;
+    width: 520px; text-align: center; box-shadow: 6px 6px 0 #000; }
+  .card h1 { font-size: 16px; margin: 0 0 12px; color: var(--accent); }
+  .card p { font-size: 10px; margin: 0 0 14px; white-space: pre-line; color: var(--ink); }
+  .card .status { font-size: 9px; color: var(--dim); min-height: 1em; margin: 10px 0 0; }
+  .card .status.err { color: #ff6b6b; }
+  .btns { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+  button { font: inherit; font-size: 10px; color: var(--ink); background: #3a3350; border: 2px solid #6a5f8a;
+    padding: 10px 12px; cursor: pointer; box-shadow: 3px 3px 0 #000; }
+  button:hover { background: #4a4266; }
+  button:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 #000; }
+  button.primary { background: #7a5a10; border-color: var(--accent); }
+  #pad { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #pad.hidden { display: none; }
+  #pad button { font-size: 11px; padding: 14px 16px; min-width: 120px; }
+  #help { font-size: 8px; color: var(--dim); text-align: center; line-height: 1.8; max-width: 640px; }
+  #log { font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.4; background: #0c0b12;
+    border: 1px solid var(--line); padding: 8px 10px; width: min(640px, 100%); margin: 0; white-space: pre-wrap; color: #cfc6e6; }
+  #log.hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game" width="320" height="180"></canvas>
+  <div id="overlay" class="hidden"><div class="card">
+    <h1 id="ov-title"></h1><p id="ov-text"></p><div class="btns" id="ov-btns"></div>
+    <div class="status" id="ov-status"></div>
+  </div></div>
+</div>
+<div id="pad" class="hidden">
+  <button data-ev="slash">SLASH (H)</button>
+  <button data-ev="special">SPECIAL (SPACE)</button>
+  <button data-ev="flat">LAY FLAT (F)</button>
+</div>
+<div id="help">G: event log</div>
+<pre id="log" class="hidden"></pre>
+
+<script>
+'use strict';
+// ============================== CONFIG ==============================
+const CFG = {
+  W: 320, H: 180, GROUND: 152,      // scene size (pixels) and ground line
+  DUMMY_X: 196,                     // where the dummy's post stands
+  BASE_HP: 100,                     // HP of the first dummy
+  HP_GROWTH: 1.3,                   // each next dummy has this much more HP
+  SLASH_DMG: [8, 12],               // random damage range of one slash
+  CRIT_CHANCE: 0.15, CRIT_MULT: 2,  // critical slash
+  COMBO_WINDOW: 1.5,                // seconds between slashes that keep a combo going
+  COMBO_BONUS: 0.1,                 // +10% damage per combo step...
+  COMBO_MAX_BONUS: 1.0,             // ...up to +100%
+  SLASH_MIN_GAP: 0.2,               // ignore a second slash sooner than this (s)
+  SPECIAL_DMG: [30, 40],            // special attack damage range
+  SPECIAL_COOLDOWN: 4,              // seconds before the special is ready again
+  RESPAWN_DELAY: 1.8,               // seconds from KO to the next dummy
+};
+
+// ============================== PROTOCOL / BLE ==============================
+// Must match StickCP2_Sword.ino. Packet: [0] id, [1] code, [2] seq, [4..7] device ms.
+const BLE_SERVICE_UUID = '7a1c0001-3f5e-4b2a-9d6c-8e4f2b1a0c57';
+const BLE_EVENT_UUID   = '7a1c0002-3f5e-4b2a-9d6c-8e4f2b1a0c57';
+const EV = { TAP1: 0, TAP2: 1, TAP3: 2, ANY_MOT: 3, NO_MOT: 4, SIG_MOT: 5, HIGH_G: 6, LOW_G: 7,
+             FLAT: 8, ORIENT: 9, REEL: 10, BLOW: 11, BTN: 12 };
+const EV_NAMES = Object.fromEntries(Object.entries(EV).map(([k, v]) => [v, k]));
+
+let inputMode = null;               // 'ble' | 'keyboard'
+let device = null, lastSeq = null, lostEvents = 0;
+const stick = { flat: false, battery: null };
+
+async function connectBle() {
+  if (!window.isSecureContext) throw new Error('Bluetooth needs https:// or http://localhost (not a file:// page).');
+  if (!navigator.bluetooth) throw new Error('This browser has no Web Bluetooth. Use Chrome or Edge on a computer or Android.');
+  if (!device) {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [BLE_SERVICE_UUID] }], optionalServices: ['battery_service'] });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+  }
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(BLE_SERVICE_UUID);
+  const evt = await svc.getCharacteristic(BLE_EVENT_UUID);
+  evt.addEventListener('characteristicvaluechanged', onBleEvent);
+  await evt.startNotifications();
+  try {
+    const bat = await (await server.getPrimaryService('battery_service')).getCharacteristic('battery_level');
+    bat.addEventListener('characteristicvaluechanged', e => { stick.battery = e.target.value.getUint8(0); });
+    stick.battery = (await bat.readValue()).getUint8(0);
+    await bat.startNotifications();
+  } catch (_) { /* battery is optional */ }
+  inputMode = 'ble';
+  lastSeq = null;
+  logLine(`connected to ${device.name || 'stick'}`);
+}
+
+function onDisconnected() {
+  logLine('stick disconnected');
+  if (inputMode === 'ble') showDisconnected();
+}
+
+function onBleEvent(e) {
+  const dv = e.target.value;
+  if (dv.byteLength < 1) return;
+  const id = dv.getUint8(0);
+  const code = dv.byteLength > 1 ? dv.getUint8(1) : 0;
+  const seq = dv.byteLength > 2 ? dv.getUint8(2) : 0;
+  if (id === 0xFF) {                                   // state packet, ~0.5 s after connect
+    stick.flat = code === 1;
+    logLine(`state: ${stick.flat ? 'lying flat' : 'in hand'}`);
+    applyFlat();
+    return;
+  }
+  if (lastSeq !== null && seq !== ((lastSeq + 1) & 0xFF)) {
+    lostEvents += (seq - lastSeq - 1 + 256) & 0xFF;
+    logLine(`!! lost events before seq ${seq}`);
+  }
+  lastSeq = seq;
+  onControllerEvent(id, code, seq);
+}
+
+// ============================== INPUT: keyboard + touch ==============================
+// Every gesture has a key, so the whole game can be played and tested without the stick.
+const randSign = () => (Math.random() < 0.5 ? 0x80 : 0);
+const VIRTUAL = {
+  slash:   () => onControllerEvent(EV.HIGH_G, 1 | randSign()),
+  special: () => onControllerEvent(EV.TAP2),
+  button:  () => onControllerEvent(EV.BTN, 1),
+  flat:    () => onControllerEvent(EV.FLAT, stick.flat ? 0 : 1),
+};
+const KEYS = { KeyH: 'slash', Enter: 'slash', Space: 'special', KeyA: 'button', KeyF: 'flat' };
+
+addEventListener('keydown', e => {
+  initAudio();
+  if (e.code === 'KeyG') { toggleLog(); return; }
+  if (inputMode !== 'keyboard' || e.repeat || !(e.code in KEYS)) return;
+  e.preventDefault();                                   // Space must not scroll the page
+  VIRTUAL[KEYS[e.code]]();
+});
+document.querySelectorAll('#pad button').forEach(b =>
+  b.addEventListener('click', () => { initAudio(); if (inputMode === 'keyboard') VIRTUAL[b.dataset.ev](); }));
+document.getElementById('game').addEventListener('pointerdown', () => {
+  initAudio();
+  if (inputMode === 'keyboard' && overlayHidden()) VIRTUAL.slash();
+});
+
+// ============================== SOUND ==============================
+let ac = null;
+function initAudio() {
+  try { if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)(); if (ac.state === 'suspended') ac.resume(); } catch (_) {}
+}
+function beep(freq, dur, { type = 'square', vol = 0.05, slide = 0, delay = 0 } = {}) {
+  if (!ac) return;
+  const t = ac.currentTime + delay, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function noise(dur, { freq = 1000, q = 1, vol = 0.12, delay = 0 } = {}) {
+  if (!ac) return;
+  const t = ac.currentTime + delay, n = Math.floor(ac.sampleRate * dur);
+  const buf = ac.createBuffer(1, n, ac.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+  s.buffer = buf; f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = q; g.gain.value = vol;
+  s.connect(f).connect(g).connect(ac.destination); s.start(t);
+}
+const sfx = {
+  whoosh()  { noise(0.12, { freq: 2400, q: 0.8, vol: 0.08 }); },
+  hit()     { noise(0.08, { freq: 700, vol: 0.18 }); beep(180, 0.06, { slide: -80 }); },
+  crit()    { noise(0.1, { freq: 900, vol: 0.2 }); beep(660, 0.08, { vol: 0.06 }); beep(990, 0.1, { vol: 0.05, delay: 0.06 }); },
+  special() { beep(220, 0.35, { type: 'sawtooth', slide: 660, vol: 0.06 }); noise(0.3, { freq: 500, q: 0.5, vol: 0.25, delay: 0.12 }); },
+  denied()  { beep(140, 0.12, { vol: 0.05 }); beep(110, 0.15, { vol: 0.05, delay: 0.1 }); },
+  ko()      { [523, 659, 784, 1047].forEach((f, i) => beep(f, 0.12, { delay: i * 0.09, vol: 0.05 })); },
+  pause()   { beep(440, 0.08, { vol: 0.04 }); beep(330, 0.1, { vol: 0.04, delay: 0.08 }); },
+  resume()  { beep(330, 0.08, { vol: 0.04 }); beep(440, 0.1, { vol: 0.04, delay: 0.08 }); },
+};
+
+// ============================== GAME ==============================
+const rnd = (a, b) => a + Math.random() * (b - a);
+const game = {
+  mode: 'menu',          // 'menu' | 'play'
+  paused: false, pauseReason: '',
+  time: 0, round: 1, roundTime: 0,
+  combo: 0, comboT: 0, bestCombo: 0, hits: 0,
+  lastSlash: -9, specialCD: 0,
+  dummy: null,
+  sword: { t: 1, dir: 1 },                   // swing animation 0..1
+  fx: [], parts: [], nums: [], shake: 0, flash: 0, msg: '', msgT: 0,
+};
+
+function newDummy() {
+  const hp = Math.round(CFG.BASE_HP * Math.pow(CFG.HP_GROWTH, game.round - 1));
+  game.dummy = { hp, maxHp: hp, ang: 0, angV: 0, hitT: 0, dead: false, deadT: 0 };
+  game.roundTime = 0;
+}
+
+function startGame() {
+  Object.assign(game, { mode: 'play', paused: false, pauseReason: '', round: 1, combo: 0, bestCombo: 0,
+                        hits: 0, specialCD: 0, fx: [], parts: [], nums: [] });
+  newDummy();
+  hideOverlay();
+  document.getElementById('pad').classList.toggle('hidden', inputMode !== 'keyboard');
+  showMsg('FIGHT!', 1.2);
+  if (inputMode === 'ble' && stick.flat) pause('flat');
+}
+
+// The single entry point for every input: stick, keyboard, touch.
+function onControllerEvent(id, code = 0, seq = null) {
+  logLine(`${(EV_NAMES[id] || 'id ' + id).padEnd(7)} code=0x${code.toString(16).padStart(2, '0')}` +
+          (seq !== null ? `  seq=${seq}` : ''));
+  if (id === EV.FLAT) { stick.flat = code === 1; applyFlat(); return; }
+  if (game.mode !== 'play' || game.paused) return;
+  if (id === EV.HIGH_G) slash(code);
+  else if (id === EV.TAP2 || id === EV.BTN) special();
+}
+
+function applyFlat() {
+  if (game.mode !== 'play') return;
+  if (stick.flat) { if (!game.paused) pause('flat'); }
+  else if (game.paused && game.pauseReason === 'flat') resume();
+}
+
+function pause(reason) {
+  game.paused = true; game.pauseReason = reason;
+  if (reason === 'flat') {
+    sfx.pause();
+    const howTo = inputMode === 'ble' ? 'Pick the stick up to keep fighting.' : 'Press F (or LAY FLAT) again to resume.';
+    showOverlay('PAUSED', `Your sword is lying flat.\n${howTo}`,
+      inputMode === 'ble' ? [{ label: 'Resume anyway', fn: () => { stick.flat = false; resume(); } }] : []);
+  }
+}
+function resume() {
+  game.paused = false; game.pauseReason = '';
+  hideOverlay(); sfx.resume(); showMsg('GO!', 0.8);
+}
+
+function showMsg(text, dur) { game.msg = text; game.msgT = dur; }
+
+function slash(code) {
+  if (game.time - game.lastSlash < CFG.SLASH_MIN_GAP) return;
+  game.lastSlash = game.time;
+  const dir = (code & 0x80) ? -1 : 1;           // swing direction from the sign of the jerk
+  game.sword = { t: 0, dir };
+  game.fx.push({ kind: 'slash', dir, t: 0, life: 0.22, tilt: rnd(-0.25, 0.25) });
+  sfx.whoosh();
+  const d = game.dummy;
+  if (d.dead) return;
+  game.combo = game.comboT > 0 ? game.combo + 1 : 1;
+  game.comboT = CFG.COMBO_WINDOW;
+  game.bestCombo = Math.max(game.bestCombo, game.combo);
+  const bonus = Math.min(CFG.COMBO_MAX_BONUS, (game.combo - 1) * CFG.COMBO_BONUS);
+  const crit = Math.random() < CFG.CRIT_CHANCE;
+  let dmg = Math.round(rnd(CFG.SLASH_DMG[0], CFG.SLASH_DMG[1]) * (1 + bonus));
+  if (crit) dmg *= CFG.CRIT_MULT;
+  hitDummy(dmg, dir, crit ? 'crit' : 'hit');
+}
+
+function special() {
+  if (game.specialCD > 0) { sfx.denied(); showMsg('SPECIAL CHARGING...', 0.8); return; }
+  const d = game.dummy;
+  if (d.dead) return;
+  game.specialCD = CFG.SPECIAL_COOLDOWN;
+  game.sword = { t: 0, dir: 1 };
+  game.fx.push({ kind: 'special', t: 0, life: 0.5 });
+  game.flash = 0.25;
+  sfx.special();
+  showMsg('CROSS SLASH!', 1);
+  hitDummy(Math.round(rnd(CFG.SPECIAL_DMG[0], CFG.SPECIAL_DMG[1])), Math.random() < 0.5 ? -1 : 1, 'special');
+}
+
+function hitDummy(dmg, dir, kind) {
+  const d = game.dummy;
+  d.hp = Math.max(0, d.hp - dmg);
+  d.angV += dir * (kind === 'special' ? 5 : kind === 'crit' ? 3.5 : 2.2);
+  d.hitT = 0.12;
+  game.hits++;
+  game.shake = kind === 'special' ? 5 : kind === 'crit' ? 3 : 1.5;
+  const color = kind === 'special' ? '#7ff7ff' : kind === 'crit' ? '#ffcc33' : '#ffffff';
+  game.nums.push({ x: CFG.DUMMY_X + rnd(-10, 10), y: 70, text: (kind === 'crit' ? 'CRIT ' : '') + dmg, color, t: 0 });
+  spawnStraw(kind === 'special' ? 26 : 9, dir);
+  if (kind === 'crit') sfx.crit(); else if (kind === 'hit') sfx.hit();   // special has its own sound
+  if (d.hp <= 0) {
+    d.dead = true; d.deadT = 0; d.fallDir = dir;
+    spawnStraw(40, dir);
+    sfx.ko();
+    showMsg(`DUMMY ${game.round} DOWN! ${game.roundTime.toFixed(1)}s`, CFG.RESPAWN_DELAY);
+  }
+}
+
+function spawnStraw(n, dir) {
+  for (let i = 0; i < n; i++)
+    game.parts.push({ x: CFG.DUMMY_X + rnd(-8, 8), y: rnd(80, 115), vx: dir * rnd(10, 90) + rnd(-30, 30),
+                      vy: rnd(-110, -20), life: rnd(0.6, 1.3), t: 0, c: Math.random() < 0.5 ? '#f0d070' : '#c89a40' });
+}
+
+function update(dt) {
+  game.time += dt;
+  game.roundTime += game.dummy.dead ? 0 : dt;
+  game.specialCD = Math.max(0, game.specialCD - dt);
+  if (game.comboT > 0 && (game.comboT -= dt) <= 0) game.combo = 0;
+  const d = game.dummy;
+  if (!d.dead) {                                   // spring wobble back to upright
+    d.angV += (-40 * d.ang - 5 * d.angV) * dt;
+    d.ang += d.angV * dt;
+  } else {                                         // fall over, then the next dummy
+    d.deadT += dt;
+    d.ang += ((d.fallDir || 1) * 1.45 - d.ang) * Math.min(1, dt * 6);
+    if (d.deadT >= CFG.RESPAWN_DELAY) { game.round++; newDummy(); showMsg(`ROUND ${game.round}`, 1); }
+  }
+  d.hitT = Math.max(0, d.hitT - dt);
+  game.sword.t = Math.min(1, game.sword.t + dt / 0.28);
+  for (const f of game.fx) f.t += dt;
+  game.fx = game.fx.filter(f => f.t < f.life);
+  for (const p of game.parts) { p.t += dt; p.vy += 260 * dt; p.x += p.vx * dt; p.y = Math.min(CFG.GROUND, p.y + p.vy * dt); if (p.y >= CFG.GROUND) p.vx *= 0.8; }
+  game.parts = game.parts.filter(p => p.t < p.life);
+  for (const n of game.nums) { n.t += dt; n.y -= 22 * dt; }
+  game.nums = game.nums.filter(n => n.t < 1);
+  game.shake = Math.max(0, game.shake - dt * 18);
+  game.flash = Math.max(0, game.flash - dt);
+  game.msgT = Math.max(0, game.msgT - dt);
+}
+
+// ============================== DRAW ==============================
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+function mkCanvas(w, h, fn) { const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d'); fn(x); return c; }
+function px(x, c, X, Y, w = 1, h = 1) { x.fillStyle = c; x.fillRect(X, Y, w, h); }
+
+// Training dummy, 32x64, pivot at the bottom of the post (16, 63)
+const DUMMY = mkCanvas(32, 64, x => {
+  px(x, '#6b4423', 14, 26, 4, 38); px(x, '#4a2e17', 17, 26, 1, 38);                // post
+  px(x, '#7a5230', 0, 22, 32, 3);  px(x, '#4a2e17', 0, 25, 32, 1);                 // arms
+  for (const ax of [0, 29]) { px(x, '#f0d070', ax, 20, 3, 1); px(x, '#f0d070', ax - 1 + (ax ? 2 : 0), 26, 2, 1); } // straw tufts
+  for (let y = 16; y <= 46; y++) {                                                 // sack body
+    const hw = Math.round(8 + 2 * Math.sin((y - 16) / 30 * Math.PI));
+    px(x, '#d8b878', 16 - hw, y, hw * 2, 1);
+    px(x, '#b8945a', 16 + hw - 3, y, 3, 1);
+    px(x, '#ecd29a', 16 - hw + 1, y, 2, 1);
+  }
+  px(x, '#7a5a30', 6, 27, 20, 2); px(x, '#7a5a30', 7, 40, 18, 2);                  // rope bands
+  px(x, '#f0d070', 10, 46, 2, 3); px(x, '#f0d070', 15, 46, 2, 4); px(x, '#f0d070', 20, 46, 2, 3); // straw skirt
+  for (let dy = -7; dy <= 7; dy++) for (let dx = -7; dx <= 7; dx++)                // head
+    if (dx * dx + dy * dy <= 46) px(x, dx > 3 ? '#b8945a' : '#d8b878', 16 + dx, 8 + dy);
+  for (const ex of [12, 18]) { px(x, '#3a2410', ex, 6); px(x, '#3a2410', ex + 2, 6); px(x, '#3a2410', ex + 1, 7); px(x, '#3a2410', ex, 8); px(x, '#3a2410', ex + 2, 8); } // X eyes
+  px(x, '#3a2410', 13, 11, 6, 1); px(x, '#3a2410', 14, 12); px(x, '#3a2410', 16, 12);  // stitched mouth
+  px(x, '#f0d070', 13, 0, 2, 2); px(x, '#f0d070', 17, 0, 2, 1);                    // hair
+});
+const DUMMY_HIT = mkCanvas(32, 64, x => { x.drawImage(DUMMY, 0, 0); x.globalCompositeOperation = 'source-atop'; x.fillStyle = '#fff'; x.fillRect(0, 0, 32, 64); });
+
+// Sword, 9x46, pivot at the pommel (4, 44)
+const SWORD = mkCanvas(9, 46, x => {
+  px(x, '#d8dde8', 3, 2, 3, 30); px(x, '#ffffff', 3, 2, 1, 30); px(x, '#8a92a6', 5, 2, 1, 30); // blade
+  px(x, '#d8dde8', 4, 0, 1, 2);                                                    // tip
+  px(x, '#e8b030', 0, 32, 9, 2); px(x, '#a07018', 0, 34, 9, 1);                    // guard
+  px(x, '#6b3a1a', 3, 35, 3, 8); px(x, '#8a5028', 3, 36, 3, 1); px(x, '#8a5028', 3, 39, 3, 1); // grip
+  px(x, '#e8b030', 2, 43, 5, 3);                                                   // pommel
+});
+
+// Static background: sky bands, hills, fence, grass
+const BG = mkCanvas(CFG.W, CFG.H, x => {
+  const sky = ['#2a2a5a', '#3a3a78', '#4e4e96', '#6a62ae', '#8c78bc', '#b48cc0', '#e0a0b0'];
+  sky.forEach((c, i) => px(x, c, 0, i * 16, CFG.W, 16));
+  px(x, '#f8e8a0', 250, 30, 14, 14); px(x, '#fff8d0', 252, 32, 10, 10);              // moon
+  for (let X = 0; X < CFG.W; X++) {                                                // hills
+    const h1 = 112 + Math.round(10 * Math.sin(X / 37) + 6 * Math.sin(X / 13));
+    px(x, '#3c3068', X, h1, 1, CFG.H - h1);
+    const h2 = 128 + Math.round(7 * Math.sin(X / 23 + 1) + 3 * Math.sin(X / 7));
+    px(x, '#2c4a3a', X, h2, 1, CFG.H - h2);
+  }
+  for (let X = 4; X < CFG.W; X += 22) { px(x, '#5a3a20', X, 128, 3, 24); }         // fence
+  px(x, '#6b4a28', 0, 133, CFG.W, 2); px(x, '#6b4a28', 0, 142, CFG.W, 2);
+  px(x, '#3e7a3a', 0, CFG.GROUND, CFG.W, CFG.H - CFG.GROUND);                      // ground
+  px(x, '#5aa04a', 0, CFG.GROUND, CFG.W, 2);
+  for (let i = 0; i < 90; i++) { const X = (i * 53) % CFG.W, Y = CFG.GROUND + 4 + (i * 17) % 24; px(x, i % 3 ? '#4a8a40' : '#2e5e2c', X, Y, 2, 1); }
+});
+
+function text(s, x, y, color = '#fff', align = 'left', size = 8) {
+  ctx.font = `${size}px "Press Start 2P", monospace`;
+  ctx.textAlign = align; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#000'; ctx.fillText(s, Math.round(x) + 1, Math.round(y) + 1);
+  ctx.fillStyle = color;  ctx.fillText(s, Math.round(x), Math.round(y));
+}
+
+function draw() {
+  ctx.save();
+  if (game.shake > 0) ctx.translate(Math.round(rnd(-game.shake, game.shake)), Math.round(rnd(-game.shake, game.shake)));
+  ctx.drawImage(BG, 0, 0);
+  if (game.mode === 'play' && game.dummy) drawPlay();
+  ctx.restore();
+  if (game.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${(game.flash / 0.25) * 0.6})`; ctx.fillRect(0, 0, CFG.W, CFG.H); }
+  if (game.mode === 'play') drawHud();
+  else text('STICK SWORD', CFG.W / 2, 60, '#ffcc33', 'center', 16);
+}
+
+function drawPlay() {
+  const d = game.dummy, gx = CFG.DUMMY_X, gy = CFG.GROUND;
+  // shadow
+  px(ctx, 'rgba(0,0,0,.35)', gx - 14, gy - 1, 28, 3);
+  // dummy (rotated around the base of its post)
+  ctx.save();
+  ctx.globalAlpha = d.dead ? Math.max(0, 1 - Math.max(0, d.deadT - 0.9) / 0.8) : 1;
+  ctx.translate(gx, gy); ctx.rotate(d.ang);
+  ctx.drawImage(d.hitT > 0 ? DUMMY_HIT : DUMMY, -16, -63);
+  ctx.restore();
+  // slash effects
+  for (const f of game.fx) {
+    const k = f.t / f.life;
+    ctx.save(); ctx.translate(gx, 96);
+    ctx.globalAlpha = 1 - k;
+    if (f.kind === 'slash') {
+      ctx.rotate(f.tilt + (f.dir > 0 ? 0.6 : -0.6));
+      ctx.fillStyle = '#ffffff';
+      const len = 70 * Math.min(1, k * 3);
+      ctx.fillRect(-35 * f.dir, -1, len * f.dir, 2);
+      ctx.fillStyle = '#9fe8ff';
+      ctx.fillRect(-35 * f.dir, 1, len * f.dir, 1);
+    } else {
+      for (const a of [0.75, -0.75]) {
+        ctx.save(); ctx.rotate(a);
+        ctx.fillStyle = '#7ff7ff'; ctx.fillRect(-60, -3, 120 * Math.min(1, k * 4), 6);
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(-60, -1, 120 * Math.min(1, k * 4), 2);
+        ctx.restore();
+      }
+    }
+    ctx.restore();
+  }
+  // straw particles
+  for (const p of game.parts) { ctx.globalAlpha = Math.min(1, (p.life - p.t) * 3); px(ctx, p.c, Math.round(p.x), Math.round(p.y), 2, 1); }
+  ctx.globalAlpha = 1;
+  // player's sword (bottom left), swings with each slash
+  const s = game.sword, e = 1 - Math.pow(1 - s.t, 3);
+  const rest = -0.35, from = s.dir > 0 ? -1.5 : 1.0, to = s.dir > 0 ? 1.0 : -1.5;
+  const ang = s.t >= 1 ? rest : (s.t < 0.5 ? from + (to - from) * (e / 0.875) : to + (rest - to) * ((s.t - 0.5) / 0.5));
+  ctx.save(); ctx.translate(92, 176); ctx.rotate(ang); ctx.drawImage(SWORD, -4, -44 * 1.6, 9 * 1.6, 46 * 1.6); ctx.restore();
+  // damage numbers
+  for (const n of game.nums) { ctx.globalAlpha = 1 - n.t; text(n.text, n.x, n.y, n.color, 'center'); }
+  ctx.globalAlpha = 1;
+}
+
+function drawHud() {
+  const d = game.dummy;
+  // HP bar above the dummy
+  const bw = 100, bx = CFG.DUMMY_X - bw / 2, by = 22;
+  px(ctx, '#000', bx - 1, by - 1, bw + 2, 8);
+  px(ctx, '#5a1a1a', bx, by, bw, 6);
+  px(ctx, d.hp / d.maxHp > 0.3 ? '#e04040' : '#ff8030', bx, by, Math.round(bw * d.hp / d.maxHp), 6);
+  px(ctx, 'rgba(255,255,255,.35)', bx, by, Math.round(bw * d.hp / d.maxHp), 1);
+  text(`HP ${d.hp}/${d.maxHp}`, CFG.DUMMY_X, by + 9, '#fff', 'center');
+  // round, time, combo
+  text(`ROUND ${game.round}`, 6, 6, '#ffcc33');
+  text(`${game.roundTime.toFixed(1)}s`, 6, 18, '#cfc6e6');
+  if (game.combo > 1) text(`COMBO x${game.combo}`, 6, 34, game.combo >= 5 ? '#ff8030' : '#fff');
+  if (game.bestCombo > 1) text(`BEST x${game.bestCombo}`, 6, 46, '#9a90b0');
+  // input / battery
+  const src = inputMode === 'ble' ? `STICK${stick.battery != null ? ' ' + stick.battery + '%' : ''}` : 'KEYBOARD';
+  text(src, CFG.W - 6, 6, inputMode === 'ble' ? '#7fe08a' : '#9a90b0', 'right');
+  // special meter
+  const ready = game.specialCD <= 0, mx = 210, my = 160, mw = 100;
+  text('SPECIAL', mx, my - 10, ready ? '#7ff7ff' : '#9a90b0');
+  px(ctx, '#000', mx - 1, my - 1, mw + 2, 7);
+  px(ctx, '#203040', mx, my, mw, 5);
+  px(ctx, ready ? '#7ff7ff' : '#3a7a90', mx, my, Math.round(mw * (1 - game.specialCD / CFG.SPECIAL_COOLDOWN)), 5);
+  if (ready && Math.floor(game.time * 3) % 2 === 0) text('READY!', mx + mw, my - 10, '#ffffff', 'right');
+  // centre message
+  if (game.msgT > 0) text(game.msg, CFG.W / 2, 56, '#ffffff', 'center', game.msg.length > 14 ? 8 : 12);
+  // hint
+  const hint = inputMode === 'ble' ? 'SWING=SLASH  2xTAP=SPECIAL  LAY FLAT=PAUSE' : 'H=SLASH  SPACE=SPECIAL  F=PAUSE';
+  ctx.globalAlpha = 0.8; text(hint, 6, 170, '#f4ead8', 'left', 6); ctx.globalAlpha = 1;
+}
+
+// ============================== MENUS (shared overlay card) ==============================
+const ov = document.getElementById('overlay');
+function showOverlay(title, body, buttons = [], status = '', isErr = false) {
+  document.getElementById('ov-title').textContent = title;
+  document.getElementById('ov-text').textContent = body;
+  const box = document.getElementById('ov-btns'); box.innerHTML = '';
+  for (const b of buttons) {
+    const el = document.createElement('button');
+    el.textContent = b.label; if (b.primary) el.className = 'primary';
+    el.addEventListener('click', () => { initAudio(); b.fn(); });
+    box.appendChild(el);
+  }
+  setStatus(status, isErr);
+  ov.classList.remove('hidden');
+}
+function setStatus(s, isErr = false) { const el = document.getElementById('ov-status'); el.textContent = s; el.classList.toggle('err', isErr); }
+function hideOverlay() { ov.classList.add('hidden'); }
+function overlayHidden() { return ov.classList.contains('hidden'); }
+
+function showMenu() {
+  game.mode = 'menu';
+  showOverlay('STICK SWORD',
+    'Your M5StickC Plus2 is the sword.\n\nSwing sharply = SLASH\nDouble tap the case = SPECIAL\nLay it flat on the table = PAUSE',
+    [{ label: 'Connect stick', primary: true, fn: doConnect },
+     { label: 'Play without stick', fn: playKeyboard }]);
+}
+
+async function doConnect() {
+  setStatus('Choose "StickCP2-Sword" in the browser window...');
+  try {
+    await connectBle();
+    startGame();
+  } catch (err) {
+    const msg = err && err.name === 'NotFoundError' ? 'No stick chosen. Is it switched on and not connected elsewhere?' : (err.message || String(err));
+    setStatus(msg, true);
+  }
+}
+
+function playKeyboard() {
+  inputMode = 'keyboard';
+  stick.flat = false;
+  startGame();
+}
+
+function showDisconnected() {
+  if (game.mode === 'play') { game.paused = true; game.pauseReason = 'disconnected'; }
+  showOverlay('STICK DISCONNECTED', 'The game is paused.\nSwitch the stick on (power button on the side) and reconnect.',
+    [{ label: 'Reconnect', primary: true, fn: async () => {
+        setStatus('Connecting...');
+        try { await connectBle(); if (game.mode !== 'play') startGame(); else if (!stick.flat) resume(); else pause('flat'); }
+        catch (err) { setStatus(err.message || String(err), true); }
+      } },
+     { label: 'Play without stick', fn: () => { inputMode = 'keyboard'; stick.flat = false;
+        document.getElementById('pad').classList.remove('hidden');
+        if (game.mode === 'play') resume(); else startGame(); } }]);
+}
+
+// ============================== Event log (G) ==============================
+const logEl = document.getElementById('log');
+const logLines = [];
+function logLine(s) {
+  const t = (performance.now() / 1000).toFixed(2).padStart(8);
+  logLines.unshift(`${t}  ${s}`); logLines.length = Math.min(logLines.length, 14);
+  if (!logEl.classList.contains('hidden')) renderLog();
+}
+function renderLog() { logEl.textContent = `lost events: ${lostEvents}   battery: ${stick.battery ?? '-'}%   flat: ${stick.flat}\n` + logLines.join('\n'); }
+function toggleLog() { logEl.classList.toggle('hidden'); renderLog(); }
+
+// ============================== Layout + main loop ==============================
+function fit() {
+  const avail = Math.min(innerWidth - 36, (innerHeight - 170) * 16 / 9);
+  const s = avail / CFG.W;
+  const scale = s >= 2 ? Math.floor(s) : s;   // integer scale keeps pixels crisp; small phones get what fits
+  cv.style.width = Math.round(CFG.W * scale) + 'px';   // height follows (height: auto)
+}
+addEventListener('resize', fit); fit();
+
+let last = performance.now() / 1000, loopPaused = false;
+function frame(ms) {
+  const t = ms / 1000, dt = Math.min(0.05, t - last); last = t;   // clamp: no jump after a tab switch
+  if (!loopPaused && game.mode === 'play' && !game.paused) update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+document.fonts && document.fonts.ready.then(() => draw());
+showMenu();
+requestAnimationFrame(frame);
+
+// Test hooks for the browser console / automation
+window.__test = {
+  EV, game, ev: onControllerEvent, draw, update, playKeyboard,
+  pause(on) { loopPaused = on; },
+  step(n = 1) { for (let i = 0; i < n; i++) update(1 / 60); },
+};
+</script>
+</body>
+</html>

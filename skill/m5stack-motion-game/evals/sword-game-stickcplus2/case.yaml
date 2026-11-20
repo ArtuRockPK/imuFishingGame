@@ -1,0 +1,5 @@
+schema_version: "1.1"
+name: sword-game-stickcplus2
+expected_outcome: |
+  A StickC Plus2 firmware that detects a swing, lay-flat and double tap in software from the MPU6886
+  and sends small BLE event packets, plus a web game that connects via Web Bluetooth and has a keyboard fallback.

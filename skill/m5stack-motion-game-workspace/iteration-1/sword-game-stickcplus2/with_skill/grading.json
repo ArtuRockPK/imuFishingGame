@@ -1,0 +1,50 @@
+{
+  "expectations": [
+    {
+      "text": "The firmware detects gestures in software from the IMU (M5.Imu / MPU6886 accelerometer), since the MPU6886 has no on-chip gesture engine",
+      "passed": true,
+      "evidence": "StickCP2_Sword.ino:185 reads M5.Imu.getAccel at 200 Hz and detects in software"
+    },
+    {
+      "text": "The swing (slash) detector requires acceleration above a threshold for a minimum duration or uses a lockout, so a tap knock is not counted as a slash",
+      "passed": true,
+      "evidence": "HIGH_G_G 3.0 g for HIGH_G_MS 50 ms plus 400 ms lock"
+    },
+    {
+      "text": "Lay-flat detection uses hysteresis (separate on/off thresholds) or a hold time, and the event is sent only on state change",
+      "passed": true,
+      "evidence": "FLAT_ON_Z 0.90 / FLAT_OFF_Z 0.75 hysteresis plus stillness; FLAT 1/0 sent on change"
+    },
+    {
+      "text": "The firmware sends small named event packets (event id + code) over a BLE notify characteristic rather than streaming raw sensor data",
+      "passed": true,
+      "evidence": "12-byte packet with event id/code/seq"
+    },
+    {
+      "text": "Advertising puts the custom service UUID in the advertising data so the browser can filter by it",
+      "passed": true,
+      "evidence": "setCompleteServices(SVC_UUID) in advertising, name in scan response"
+    },
+    {
+      "text": "The web page connects with navigator.bluetooth.requestDevice filtered by the service UUID and subscribes to notifications",
+      "passed": true,
+      "evidence": "requestDevice filters services:[BLE_SERVICE_UUID], startNotifications"
+    },
+    {
+      "text": "The web game has a keyboard mode that triggers the same events (slash, pause/flat, special attack) through the same handler as BLE",
+      "passed": true,
+      "evidence": "KEYS map H/Enter slash, Space special, F flat through same handler"
+    },
+    {
+      "text": "The answer tells the user which Arduino board and libraries to select (M5StickCPlus2 board, M5Unified) and that Web Bluetooth needs Chrome/Edge over HTTPS or localhost",
+      "passed": true,
+      "evidence": "answer.md: M5StickCPlus2 board, M5Unified, Chrome/Edge, https or localhost"
+    }
+  ],
+  "summary": {
+    "passed": 8,
+    "failed": 0,
+    "total": 8,
+    "pass_rate": 1.0
+  }
+}

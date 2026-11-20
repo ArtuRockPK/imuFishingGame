@@ -1,0 +1,384 @@
+{
+  "metadata": {
+    "skill_name": "m5stack-motion-game",
+    "skill_path": "<path/to/skill>",
+    "executor_model": "<model-name>",
+    "analyzer_model": "<model-name>",
+    "timestamp": "2026-11-20T11:15:26Z",
+    "evals_run": [
+      "spin-direction-feature",
+      "stick-imu-stops-reading",
+      "sword-game-stickcplus2"
+    ],
+    "runs_per_configuration": 1
+  },
+  "runs": [
+    {
+      "eval_id": "spin-direction-feature",
+      "eval_name": "spin-direction-feature",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 7,
+        "failed": 0,
+        "total": 7,
+        "time_seconds": 235.2,
+        "tokens": 100225,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "The firmware computes spin direction as a sensor axis plus sign (e.g. from integrated gyro rotation and/or cross products of consecutive samples) and sends it in the BLE packet",
+          "passed": true,
+          "evidence": "spin_direction.h builds aux byte axis+sign"
+        },
+        {
+          "text": "The firmware handles both twisting around the device's own axis and circular wrist motion where the gyro vector rotates",
+          "passed": true,
+          "evidence": "twist, gyro circle and accel circle methods"
+        },
+        {
+          "text": "The firmware reports when the direction is unknown/ambiguous (e.g. a confidence flag or threshold) rather than always guessing",
+          "passed": true,
+          "evidence": "bit6 known flag with strength/share thresholds"
+        },
+        {
+          "text": "The game learns which axis+sign means clockwise for this device and grip through a calibration step where the player spins in a known direction",
+          "passed": true,
+          "evidence": "spinSetup learns CW then CCW from 45 packets, 70% agreement"
+        },
+        {
+          "text": "The calibration result is stored per device (e.g. localStorage keyed by device name) so it is not repeated every session",
+          "passed": true,
+          "evidence": "localStorage keyed per device name"
+        },
+        {
+          "text": "The JS maps incoming direction to +1/-1/0 and the mini-game uses it to push the marker right/left",
+          "passed": true,
+          "evidence": "stickSpin returns -1/0/+1 and push; hold-fish.js moves marker"
+        },
+        {
+          "text": "The solution includes keyboard keys for spinning clockwise and counter-clockwise so the mini-game can be tested without the stick",
+          "passed": true,
+          "evidence": "KEY_SPIN R/E/T keys"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": "stick-imu-stops-reading",
+      "eval_name": "stick-imu-stops-reading",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 5,
+        "failed": 0,
+        "total": 5,
+        "time_seconds": 126.8,
+        "tokens": 79336,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "The answer identifies that M5Unified's internal I2C driver (M5.In_I2C) re-attaches pins 47/48 on its own transactions (e.g. during M5.update()), taking them away from Arduino Wire",
+          "passed": true,
+          "evidence": "answer.md:5 M5Unified re-attaches 47/48 inside M5.update()"
+        },
+        {
+          "text": "The answer tells the user to access the BMI270 through M5.In_I2C (or M5Unified's own IMU access) instead of Wire on pins 47/48",
+          "passed": true,
+          "evidence": "answer.md:13 use M5.In_I2C read/writeRegister"
+        },
+        {
+          "text": "The answer recommends the Bosch BMI270 legacy configuration (bmi270_legacy_*) for single/double tap and orientation, since the main config lacks them",
+          "passed": true,
+          "evidence": "answer.md:23 legacy config for tap/orientation"
+        },
+        {
+          "text": "The answer notes the SparkFun wrapper cannot load the legacy config, so the Bosch API bundled in it must be called directly",
+          "passed": true,
+          "evidence": "answer.md:25 SparkFun cannot load legacy; call bundled bmi270_legacy_* directly"
+        },
+        {
+          "text": "The answer provides code that maps features to an interrupt and reads events by polling the interrupt status register (and the tap status register for tap type)",
+          "passed": true,
+          "evidence": ".ino maps features via bmi270_legacy_map_feat_int, polls bmi2_get_int_status, reads TAP_STATUS_REG"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": "sword-game-stickcplus2",
+      "eval_name": "sword-game-stickcplus2",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 8,
+        "failed": 0,
+        "total": 8,
+        "time_seconds": 425.9,
+        "tokens": 128090,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "The firmware detects gestures in software from the IMU (M5.Imu / MPU6886 accelerometer), since the MPU6886 has no on-chip gesture engine",
+          "passed": true,
+          "evidence": "StickCP2_Sword.ino:185 reads M5.Imu.getAccel at 200 Hz and detects in software"
+        },
+        {
+          "text": "The swing (slash) detector requires acceleration above a threshold for a minimum duration or uses a lockout, so a tap knock is not counted as a slash",
+          "passed": true,
+          "evidence": "HIGH_G_G 3.0 g for HIGH_G_MS 50 ms plus 400 ms lock"
+        },
+        {
+          "text": "Lay-flat detection uses hysteresis (separate on/off thresholds) or a hold time, and the event is sent only on state change",
+          "passed": true,
+          "evidence": "FLAT_ON_Z 0.90 / FLAT_OFF_Z 0.75 hysteresis plus stillness; FLAT 1/0 sent on change"
+        },
+        {
+          "text": "The firmware sends small named event packets (event id + code) over a BLE notify characteristic rather than streaming raw sensor data",
+          "passed": true,
+          "evidence": "12-byte packet with event id/code/seq"
+        },
+        {
+          "text": "Advertising puts the custom service UUID in the advertising data so the browser can filter by it",
+          "passed": true,
+          "evidence": "setCompleteServices(SVC_UUID) in advertising, name in scan response"
+        },
+        {
+          "text": "The web page connects with navigator.bluetooth.requestDevice filtered by the service UUID and subscribes to notifications",
+          "passed": true,
+          "evidence": "requestDevice filters services:[BLE_SERVICE_UUID], startNotifications"
+        },
+        {
+          "text": "The web game has a keyboard mode that triggers the same events (slash, pause/flat, special attack) through the same handler as BLE",
+          "passed": true,
+          "evidence": "KEYS map H/Enter slash, Space special, F flat through same handler"
+        },
+        {
+          "text": "The answer tells the user which Arduino board and libraries to select (M5StickCPlus2 board, M5Unified) and that Web Bluetooth needs Chrome/Edge over HTTPS or localhost",
+          "passed": true,
+          "evidence": "answer.md: M5StickCPlus2 board, M5Unified, Chrome/Edge, https or localhost"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": "spin-direction-feature",
+      "eval_name": "spin-direction-feature",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.57,
+        "passed": 4,
+        "failed": 3,
+        "total": 7,
+        "time_seconds": 145.1,
+        "tokens": 66069,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "The firmware computes spin direction as a sensor axis plus sign (e.g. from integrated gyro rotation and/or cross products of consecutive samples) and sends it in the BLE packet",
+          "passed": true,
+          "evidence": "signed rate along learned spin axis sent over BLE"
+        },
+        {
+          "text": "The firmware handles both twisting around the device's own axis and circular wrist motion where the gyro vector rotates",
+          "passed": false,
+          "evidence": "Projects gyro onto a learned axis: handles twist only; circular wrist motion where the gyro vector rotates is not handled"
+        },
+        {
+          "text": "The firmware reports when the direction is unknown/ambiguous (e.g. a confidence flag or threshold) rather than always guessing",
+          "passed": true,
+          "evidence": "quality 0..1 score, wobble ignored below 0.55"
+        },
+        {
+          "text": "The game learns which axis+sign means clockwise for this device and grip through a calibration step where the player spins in a known direction",
+          "passed": true,
+          "evidence": "\"spin clockwise for 2 s\" calibration"
+        },
+        {
+          "text": "The calibration result is stored per device (e.g. localStorage keyed by device name) so it is not repeated every session",
+          "passed": false,
+          "evidence": "single global localStorage key spinDir.calibration.v1, not per device"
+        },
+        {
+          "text": "The JS maps incoming direction to +1/-1/0 and the mini-game uses it to push the marker right/left",
+          "passed": true,
+          "evidence": "read() returns -1/0/1 and push; tug-minigame uses it"
+        },
+        {
+          "text": "The solution includes keyboard keys for spinning clockwise and counter-clockwise so the mini-game can be tested without the stick",
+          "passed": false,
+          "evidence": "no keyboard keys for CW/CCW testing"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": "stick-imu-stops-reading",
+      "eval_name": "stick-imu-stops-reading",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.8,
+        "passed": 4,
+        "failed": 1,
+        "total": 5,
+        "time_seconds": 159.1,
+        "tokens": 68677,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "The answer identifies that M5Unified's internal I2C driver (M5.In_I2C) re-attaches pins 47/48 on its own transactions (e.g. during M5.update()), taking them away from Arduino Wire",
+          "passed": true,
+          "evidence": "answer.md:5-11 M5Unified owns bus, M5.update routes pins to its controller"
+        },
+        {
+          "text": "The answer tells the user to access the BMI270 through M5.In_I2C (or M5Unified's own IMU access) instead of Wire on pins 47/48",
+          "passed": true,
+          "evidence": "answer.md:13 talk through M5.In_I2C"
+        },
+        {
+          "text": "The answer recommends the Bosch BMI270 legacy configuration (bmi270_legacy_*) for single/double tap and orientation, since the main config lacks them",
+          "passed": true,
+          "evidence": "answer.md:27-29 legacy config"
+        },
+        {
+          "text": "The answer notes the SparkFun wrapper cannot load the legacy config, so the Bosch API bundled in it must be called directly",
+          "passed": false,
+          "evidence": "Says SparkFun cannot give legacy, but tells user to copy Bosch API files and remove SparkFun instead of using the bundled API (extra work, duplicate-symbol risk)"
+        },
+        {
+          "text": "The answer provides code that maps features to an interrupt and reads events by polling the interrupt status register (and the tap status register for tap type)",
+          "passed": true,
+          "evidence": ".ino maps features and polls bmi2_get_int_status"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": "sword-game-stickcplus2",
+      "eval_name": "sword-game-stickcplus2",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.75,
+        "passed": 6,
+        "failed": 2,
+        "total": 8,
+        "time_seconds": 237.6,
+        "tokens": 76906,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "The firmware detects gestures in software from the IMU (M5.Imu / MPU6886 accelerometer), since the MPU6886 has no on-chip gesture engine",
+          "passed": true,
+          "evidence": "M5.Imu.update/getImuData, software detection"
+        },
+        {
+          "text": "The swing (slash) detector requires acceleration above a threshold for a minimum duration or uses a lockout, so a tap knock is not counted as a slash",
+          "passed": true,
+          "evidence": "gyro peak > 350 dps with re-arm below 120 dps and 250 ms min gap (lockout)"
+        },
+        {
+          "text": "Lay-flat detection uses hysteresis (separate on/off thresholds) or a hold time, and the event is sent only on state change",
+          "passed": true,
+          "evidence": "FLAT_HOLD_MS 1000 still hold; PAUSE/RESUME sent on change"
+        },
+        {
+          "text": "The firmware sends small named event packets (event id + code) over a BLE notify characteristic rather than streaming raw sensor data",
+          "passed": true,
+          "evidence": "short text notifications SLASH/SPECIAL/PAUSE, not raw data"
+        },
+        {
+          "text": "Advertising puts the custom service UUID in the advertising data so the browser can filter by it",
+          "passed": false,
+          "evidence": "Advertises only the name (Nordic UART UUIDs not in advertising data)"
+        },
+        {
+          "text": "The web page connects with navigator.bluetooth.requestDevice filtered by the service UUID and subscribes to notifications",
+          "passed": false,
+          "evidence": "requestDevice filters by namePrefix StickSword, not service UUID"
+        },
+        {
+          "text": "The web game has a keyboard mode that triggers the same events (slash, pause/flat, special attack) through the same handler as BLE",
+          "passed": true,
+          "evidence": "simulator: Space/S slash, D special, P flat, sends same messages"
+        },
+        {
+          "text": "The answer tells the user which Arduino board and libraries to select (M5StickCPlus2 board, M5Unified) and that Web Bluetooth needs Chrome/Edge over HTTPS or localhost",
+          "passed": true,
+          "evidence": "answer.md: M5StickCPlus2, M5Unified, Chrome/Edge, localhost"
+        }
+      ],
+      "notes": []
+    }
+  ],
+  "run_summary": {
+    "with_skill": {
+      "pass_rate": {
+        "mean": 1.0,
+        "stddev": 0.0,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "time_seconds": {
+        "mean": 262.6333,
+        "stddev": 151.4254,
+        "min": 126.8,
+        "max": 425.9
+      },
+      "tokens": {
+        "mean": 102550.3333,
+        "stddev": 24460.0391,
+        "min": 79336,
+        "max": 128090
+      }
+    },
+    "without_skill": {
+      "pass_rate": {
+        "mean": 0.7067,
+        "stddev": 0.121,
+        "min": 0.57,
+        "max": 0.8
+      },
+      "time_seconds": {
+        "mean": 180.6,
+        "stddev": 49.8573,
+        "min": 145.1,
+        "max": 237.6
+      },
+      "tokens": {
+        "mean": 70550.6667,
+        "stddev": 5656.2454,
+        "min": 66069,
+        "max": 76906
+      }
+    },
+    "delta": {
+      "pass_rate": "+0.29",
+      "time_seconds": "+82.0",
+      "tokens": "+32000"
+    }
+  },
+  "notes": [
+    "IMU-bug case barely discriminates: the baseline also found the M5.In_I2C pin conflict and the legacy config (4/5 vs 5/5); only the 'use the bundled Bosch API' detail differed.",
+    "Biggest gains are protocol/architecture choices the baseline does not make on its own: service UUID in advertising + filter by service, per-device calibration, twist AND circle spin detection, keyboard test keys.",
+    "With-skill runs cost more: about 1.4x tokens and up to 1.8x time on the sword game (the run also self-tested the page in a browser).",
+    "Single run per configuration and one grader (the skill author) - treat numbers as indicative, not statistically solid."
+  ]
+}

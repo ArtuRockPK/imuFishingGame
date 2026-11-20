@@ -1,0 +1,45 @@
+{
+  "expectations": [
+    {
+      "text": "The firmware computes spin direction as a sensor axis plus sign (e.g. from integrated gyro rotation and/or cross products of consecutive samples) and sends it in the BLE packet",
+      "passed": true,
+      "evidence": "spin_direction.h builds aux byte axis+sign"
+    },
+    {
+      "text": "The firmware handles both twisting around the device's own axis and circular wrist motion where the gyro vector rotates",
+      "passed": true,
+      "evidence": "twist, gyro circle and accel circle methods"
+    },
+    {
+      "text": "The firmware reports when the direction is unknown/ambiguous (e.g. a confidence flag or threshold) rather than always guessing",
+      "passed": true,
+      "evidence": "bit6 known flag with strength/share thresholds"
+    },
+    {
+      "text": "The game learns which axis+sign means clockwise for this device and grip through a calibration step where the player spins in a known direction",
+      "passed": true,
+      "evidence": "spinSetup learns CW then CCW from 45 packets, 70% agreement"
+    },
+    {
+      "text": "The calibration result is stored per device (e.g. localStorage keyed by device name) so it is not repeated every session",
+      "passed": true,
+      "evidence": "localStorage keyed per device name"
+    },
+    {
+      "text": "The JS maps incoming direction to +1/-1/0 and the mini-game uses it to push the marker right/left",
+      "passed": true,
+      "evidence": "stickSpin returns -1/0/+1 and push; hold-fish.js moves marker"
+    },
+    {
+      "text": "The solution includes keyboard keys for spinning clockwise and counter-clockwise so the mini-game can be tested without the stick",
+      "passed": true,
+      "evidence": "KEY_SPIN R/E/T keys"
+    }
+  ],
+  "summary": {
+    "passed": 7,
+    "failed": 0,
+    "total": 7,
+    "pass_rate": 1.0
+  }
+}

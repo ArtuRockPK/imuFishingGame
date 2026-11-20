@@ -1,0 +1,35 @@
+{
+  "expectations": [
+    {
+      "text": "The answer identifies that M5Unified's internal I2C driver (M5.In_I2C) re-attaches pins 47/48 on its own transactions (e.g. during M5.update()), taking them away from Arduino Wire",
+      "passed": true,
+      "evidence": "answer.md:5-11 M5Unified owns bus, M5.update routes pins to its controller"
+    },
+    {
+      "text": "The answer tells the user to access the BMI270 through M5.In_I2C (or M5Unified's own IMU access) instead of Wire on pins 47/48",
+      "passed": true,
+      "evidence": "answer.md:13 talk through M5.In_I2C"
+    },
+    {
+      "text": "The answer recommends the Bosch BMI270 legacy configuration (bmi270_legacy_*) for single/double tap and orientation, since the main config lacks them",
+      "passed": true,
+      "evidence": "answer.md:27-29 legacy config"
+    },
+    {
+      "text": "The answer notes the SparkFun wrapper cannot load the legacy config, so the Bosch API bundled in it must be called directly",
+      "passed": false,
+      "evidence": "Says SparkFun cannot give legacy, but tells user to copy Bosch API files and remove SparkFun instead of using the bundled API (extra work, duplicate-symbol risk)"
+    },
+    {
+      "text": "The answer provides code that maps features to an interrupt and reads events by polling the interrupt status register (and the tap status register for tap type)",
+      "passed": true,
+      "evidence": ".ino maps features and polls bmi2_get_int_status"
+    }
+  ],
+  "summary": {
+    "passed": 4,
+    "failed": 1,
+    "total": 5,
+    "pass_rate": 0.8
+  }
+}
