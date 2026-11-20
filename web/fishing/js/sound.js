@@ -108,6 +108,10 @@ const sfx = {
   bite:   () => { for (let i = 0; i < 3; i++) beep(1320, 0.09, { vol: 0.08, delay: i * 0.13 }); },
   hook:   () => beep(520, 0.15, { slide: 1040, vol: 0.07 }),               // подсечка
   crank:  () => beep(760, 0.05, { vol: 0.05 }),                            // поворот при вываживании
+  getReady: () => [880, 880, 1320].forEach((f, i) =>                    // «приготовься» перед удержанием
+            beep(f, i < 2 ? 0.1 : 0.22, { vol: 0.08, delay: i * 0.18 })),
+  sweet:  () => { beep(1319, 0.06, { type: 'triangle', vol: 0.09 });        // маркер в центре (balance.js)
+                  beep(1760, 0.08, { type: 'triangle', vol: 0.07, delay: 0.05 }); },
   tension: () => { beep(330, 0.12, { vol: 0.08 }); beep(247, 0.18, { vol: 0.08, delay: 0.13 }); },   // рыба тянет
   snap:   () => beep(1400, 0.12, { type: 'sawtooth', vol: 0.08, slide: 150 }),   // леска лопнула
   slap:   () => beep(140, 0.08, { vol: 0.1, slide: 60 }),                  // хлопок мимо комара / рыба шлёпнулась
@@ -121,6 +125,11 @@ const sfx = {
   ignite: () => { noiseHit(0.9, { vol: 0.3, type: 'lowpass', freq: 400, freq2: 1800, attack: 0.15 });
                   [392, 523, 659, 784].forEach((f, i) => beep(f, 0.14, { type: 'triangle', vol: 0.08, delay: 0.3 + i * 0.09 })); },
   crunch: () => { noiseHit(0.09, { vol: 0.25, type: 'highpass', freq: 1800 }); beep(170, 0.06, { vol: 0.06, slide: 90 }); },
+  swing:  () => noiseHit(0.12, { vol: 0.07, freq: 500, freq2: 1600, q: 0.7 }),                        // топор свистит (wood.js)
+  chop:   () => { noiseHit(0.1, { vol: 0.3, type: 'highpass', freq: 1200 }); beep(140, 0.1, { vol: 0.1, slide: 70 }); },   // отрубил
+  crack:  () => { noiseHit(0.18, { vol: 0.35, freq: 2400, q: 0.6 }); beep(220, 0.08, { vol: 0.08, slide: 110 }); },  // раскол
+  thunk:  () => { noiseHit(0.06, { vol: 0.2, type: 'lowpass', freq: 900 }); beep(110, 0.08, { vol: 0.09 }); },     // топор застрял
+  thud:   () => beep(80, 0.12, { vol: 0.12, slide: 45 }),                                                // мимо, в землю
   yum:    () => [523, 659, 784, 659, 1047].forEach((f, i) =>                // "м-м, вкусно!"
             beep(f, i < 4 ? 0.1 : 0.35, { type: 'triangle', vol: 0.09, delay: i * 0.1 })),
   caught: () => [523, 659, 784, 1047].forEach((f, i) => beep(f, 0.12, { vol: 0.07, delay: i * 0.1 })),

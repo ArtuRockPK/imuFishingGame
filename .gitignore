@@ -1,6 +1,9 @@
 # Скомпилированные прошивки (Arduino IDE: Sketch -> Export Compiled Binary)
 build/
 
+# Исходники роликов с жестами (в игре - сжатые копии в web/fishing/media/gestures/)
+video/
+
 # Старый архив игры
 web/fishing.zip
 

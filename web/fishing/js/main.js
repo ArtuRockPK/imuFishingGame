@@ -13,6 +13,7 @@ function frame(ms) {
   last = tNow;
   now += dt;
   if (game.state !== 'wait' && !paused) update(dt);
+  updateGear();                                // гаечка настроек (settings.js)
   draw(now, paused ? 0 : dt);
   updateAmbience(dt);                 // звуки природы (ambience.js)
   requestAnimationFrame(frame);

@@ -2,7 +2,8 @@
 // =====================================================================
 //  СТАРТОВЫЙ ЭКРАН (окно поверх игры)
 //
-//  Шаги: язык -> сложность -> подключение контроллера.
+//  Шаги: язык -> сложность -> подключение контроллера -> настройка жестов (setup.js,
+//  только в первый раз для этого контроллера или по кнопке «Подключить и настроить»).
 //  Каждый шаг - функция show...Menu(), которая рисует заголовок, текст и кнопки.
 //  Тот же окошко используется для паузы, когда стик отключился (controller.js).
 // =====================================================================
@@ -36,6 +37,10 @@ function showOverlay(title, textStr, buttons = [], status = '', isErr = false) {
     overlayButtons.appendChild(el);
   }
   setStatus(status, isErr);
+  // Ролик, полоска и номер шага бывают только в настройке контроллера - она включит их сама
+  delete overlayTitle.dataset.step;
+  document.getElementById('overlayVideo').style.display = 'none';
+  document.getElementById('overlayBar').style.display = 'none';
   overlay.classList.remove('hidden');
 }
 function hideOverlay() { overlay.classList.add('hidden'); }
@@ -56,8 +61,29 @@ function showLanguageMenu() {
     label: l.name,
     lang: l.id,
     selected: l.id === lang,
-    onClick: () => { setLanguage(l.id); showDifficultyMenu(); },
+    onClick: () => { setLanguage(l.id); showFirmwareMenu(); },
   })));
+}
+
+// ---------- Шаг 1.5: свежая прошивка контроллера ----------
+// Новые функции игры (например, кнопка вместо двойного тапа) работают только со свежей прошивкой.
+// Ссылки - веб-прошивальщик M5Burner (те же, что в README): открываются в новой вкладке
+const FIRMWARE_LINKS = [
+  { name: 'StickS3',        url: 'https://burner.m5stack.com/share/firmware/X65WLT' },
+  { name: 'StickC Plus2',   url: 'https://burner.m5stack.com/EVRRG7' },
+  { name: 'Cardputer ADV',  url: 'https://burner.m5stack.com/K482U9' },
+];
+
+function showFirmwareMenu() {
+  const buttons = FIRMWARE_LINKS.map(f => ({
+    label: T('btn_flash', { name: f.name }),
+    sub: 'M5Burner',
+    secondary: true,
+    onClick: () => window.open(f.url, '_blank', 'noopener'),
+  }));
+  buttons.push({ label: T('btn_firmware_ok'), onClick: showDifficultyMenu });
+  buttons.push({ label: T('btn_back'), secondary: true, onClick: showLanguageMenu });
+  showOverlay(T('firmware_title'), T('firmware_text'), buttons);
 }
 
 // ---------- Шаг 2: сложность ----------
@@ -72,14 +98,16 @@ function showDifficultyMenu() {
       showConnectMenu();
     },
   }));
-  buttons.push({ label: T('btn_back'), secondary: true, onClick: showLanguageMenu });
+  buttons.push({ label: T('btn_back'), secondary: true, onClick: showFirmwareMenu });
   showOverlay(T('choose_difficulty'), T('goal_text', { kg: FISH.goalKg }), buttons);
 }
 
 // ---------- Шаг 3: подключение ----------
 function showConnectMenu() {
   showOverlay(T(game.difficulty.name), T('connect_text'), [
-    { label: T('btn_connect'), onClick: connectBle },
+    { label: T('btn_connect'), onClick: () => { forceSetup = false; connectBle(); } },
+    { label: T('btn_connect_setup'), sub: T('btn_connect_setup_sub'), secondary: true,
+      onClick: () => { forceSetup = true; connectBle(); } },
     { label: T('btn_keyboard'), secondary: true, onClick: startKeyboard },
     { label: T('btn_back'), secondary: true, onClick: showDifficultyMenu },
   ]);

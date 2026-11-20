@@ -13,13 +13,22 @@
 <div id="stage">
   <canvas id="game" width="320" height="180"></canvas>
   <canvas id="hud"></canvas>
+  <!-- Гаечка: окно настроек прямо в игре (js/settings.js) -->
+  <button id="gear" type="button" style="display:none" aria-label="Settings">
+    <svg viewBox="0 0 16 16" shape-rendering="crispEdges" aria-hidden="true">
+      <path fill="currentColor" d="M7 0h2v2h2V1h1v1h1v1h-1v2h1v2h2v2h-2v2h-1v2h1v1h-1v1h-1v-1h-2v2H7v-2H5v1H4v-1H3v-1h1v-2H3V9H1V7h2V5h1V3H3V2h1V1h1v1h2zM6 6v4h4V6z"/>
+    </svg>
+  </button>
 </div>
 
 <div class="overlay" id="overlay">
   <div class="card">
     <!-- Заголовок, текст и кнопки заполняет js/menu.js на выбранном языке -->
     <h1 id="overlayTitle"></h1>
+    <!-- Ролик с жестом и полоска прогресса - только в настройке контроллера (js/setup.js) -->
+    <video id="overlayVideo" autoplay loop muted playsinline style="display:none"></video>
     <p id="overlayText"></p>
+    <div id="overlayBar" style="display:none"><i></i></div>
     <div id="overlayButtons"></div>
     <div id="overlayStatus"></div>
   </div>
@@ -46,13 +55,17 @@
 <script src="js/mosquito.js"></script>
 <script src="js/bucket.js"></script>
 <script src="js/campfire.js"></script>
+<script src="js/wood.js"></script>
+<script src="js/balance.js"></script>
 <script src="js/stick.js"></script>
 <script src="js/game.js"></script>
 <script src="js/states.js"></script>
 <script src="js/photo.js"></script>
 <script src="js/draw.js"></script>
 <script src="js/menu.js"></script>
+<script src="js/settings.js"></script>
 <script src="js/controller.js"></script>
+<script src="js/setup.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>

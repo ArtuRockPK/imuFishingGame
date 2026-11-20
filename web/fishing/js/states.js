@@ -38,9 +38,9 @@ const STATES = {
 
   // ---------- Шаг 1: маркер ездит слева направо, выбираем столбец ----------
   aimX: {
-    hint: () => T('hint_aim_x'),
+    hint: () => aimHint('hint_aim_x'),
     onEvent(id) {
-      if (id === EV.TAP2) {
+      if (isAimPick(id)) {             // двойной тап или кнопка - см. настройки (settings.js)
         game.targetX = game.markerX;
         sfx.lock();
         setState('aimY');
@@ -54,9 +54,9 @@ const STATES = {
 
   // ---------- Шаг 2: маркер ездит от берега вдаль, выбираем дальность ----------
   aimY: {
-    hint: () => T('hint_aim_y'),
+    hint: () => aimHint('hint_aim_y'),
     onEvent(id) {
-      if (id === EV.TAP2) {
+      if (isAimPick(id)) {
         game.targetY = game.markerY;
         sfx.ready();
         setState('ready');
@@ -88,10 +88,10 @@ const STATES = {
 
   // ---------- Прикормка: выбор сектора (как прицел), потом HIGH-G ----------
   baitAimX: {
-    hint: () => T('hint_bait_x'),
+    hint: () => aimHint('hint_bait_x'),
     alert: true,
     onEvent(id) {
-      if (id === EV.TAP2) {
+      if (isAimPick(id)) {
         game.targetX = game.markerX;
         sfx.lock();
         setState('baitAimY');
@@ -101,9 +101,9 @@ const STATES = {
   },
 
   baitAimY: {
-    hint: () => T('hint_bait_y'),
+    hint: () => aimHint('hint_bait_y'),
     onEvent(id) {
-      if (id === EV.TAP2) {
+      if (isAimPick(id)) {
         game.targetY = game.markerY;
         sfx.ready();
         setState('baitReady');
@@ -263,8 +263,11 @@ const STATES = {
   // Стик присылает скорость вращения (об/с), обороты копятся в game.turns.
   // Со старой прошивкой без катушки каждый ORIENT засчитывается за один оборот.
   fight: {
-    hint: () => T(game.tension ? 'hint_tension' : 'hint_fight'),
+    hint: () => T(game.balance ? (game.balance.warn ? 'hint_get_ready' : 'hint_balance')
+                  : game.tension ? 'hint_tension' : 'hint_fight'),
     enter() {
+      game.balance = null;        // удержание рыбы (balance.js) - один раз на середине шкалы
+      game.balanceDone = false;
       game.reelSpeed = 0;
       game.reelAt = 0;
       game.tension = false;       // сразу после подсечки натяжения нет, чтобы игрок успел освоиться
@@ -277,6 +280,7 @@ const STATES = {
     },
     exit() {
       game.reelSpeed = 0;
+      game.balance = null;
       setReel(false);
     },
     onEvent(id, code) {
@@ -290,6 +294,12 @@ const STATES = {
     update(dt, t) {
       // Скорость не приходила полсекунды (пакеты потерялись) - считаем, что не крутят
       if (inputMode === 'ble' && t - game.reelAt > 0.5) game.reelSpeed = 0;
+      // Удержание рыбы (balance.js). Пока идёт «Приготовься» - обычное вываживание (крутить можно),
+      // только без натяжения; на воде сверху - своя логика, подмотки нет
+      if (game.balance) {
+        updateBalance(dt, t);
+        if (!game.balance || !game.balance.warn) return;
+      }
       // Натяжение по таймеру (настройки - TENSION в config.js):
       // зелёный (calm) -> плавно краснеет (warn) -> красный (tension) -> плавно зеленеет (relax) -> ...
       if (t >= game.tensionNext) {
@@ -343,6 +353,12 @@ const STATES = {
       game.floatX = game.targetX + Math.sin(t * 2.3) * 8 + Math.sin(t * 7) * (game.tension ? 5 : 2);
       game.floatY = pullY + Math.sin(t * 3.1) * 2;
       if (Math.random() < dt * 6) addRipple(game.floatX, game.floatY + 1, 0.5);
+
+      // Половина шкалы - рыба рвётся в стороны, её надо удержать (balance.js)
+      if (!game.balance && !game.balanceDone && progress >= BALANCE.atProgress && balanceSupported()) {
+        startBalance();
+        return;
+      }
 
       if (game.turns >= game.fightTurns) {
         // Вытащили! Какая рыба - выбрано при подсечке в rollFish() (game.js).
@@ -408,9 +424,11 @@ const STATES = {
 
   // ---------- Ночной костёр (campfire.js): дуть в стик, потом крутить вертел ----------
   campfire: {
-    hint: () => T(fire.phase === 'kindle' ? 'hint_campfire_blow'
-                : fire.phase === 'cook' ? 'hint_campfire_cook'
-                : fire.phase === 'eat' || fire.phase === 'done' ? 'hint_campfire_eat' : ''),
+    hint: () => T(fire.phase === 'chop' ? 'hint_wood_chop'
+                : fire.phase === 'split' ? 'hint_wood_split'
+                : fire.phase === 'kindle' ? 'hint_campfire_blow'
+                : fire.phase === 'cook' ? (fire.slow > 0.4 ? 'cook_slow' : fire.fast > 0.4 ? 'cook_fast' : 'hint_campfire_cook')
+                : fire.phase === 'eat' || (fire.phase === 'done' && fire.bites) ? 'hint_campfire_eat' : ''),
     enter() { startCampfire(); },
     exit() { stopCampfire(); },
     onEvent(id, code) { campfireEvent(id, code); },

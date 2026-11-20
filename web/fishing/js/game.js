@@ -35,12 +35,16 @@ const game = {
   tensionLevel: 0,                        // 0 - зелёный, 1 - красный (для индикатора)
   tensionStart: 0, tensionNext: 0,        // когда натяжение началось / когда сменится фаза
   tensionShortGap: false,                 // прошлая пауза между натяжениями была короткой
+  balance: null, balanceDone: false,      // удержание рыбы на середине вываживания (balance.js)
   difficulty: DIFFICULTIES[1],            // уровень сложности (выбирается на стартовом экране)
   fish: null, fishWeight: 0, rarity: null,   // пойманная рыба: вид, вес (кг), редкость
   bucketFish: [],                         // рыбы в ведре (мини-игра bucket.js), для рисования
   campfirePending: false,                 // наступила ночь - после этой попытки разводим костёр (campfire.js)
   campfireLit: false, campfireOutAt: -100,  // костёр у рыбака горит / когда погас (дымок)
   caughtCount: 0, totalWeight: 0,         // сколько рыб поймано и их общий вес (кг)
+  catches: [],                            // все рыбы в улове по порядку: { fish, weight } - их жарят на костре
+  trophies: [],                           // пойманные рыбы редче обычной: { fish, weight, rarity } - в итогах
+  playTime: 0,                            // секунд с начала партии (таймер справа внизу), стоит на итогах
   hooked: null,                           // предмет на крючке (floaters.js), пока сматываем
   worms: FISH.worms, wormLostTime: -10,   // сколько червячков осталось / когда пропал последний
   message: '', messageColor: C.text, messageSize: 8, messageTime: -10,   // сообщение по центру
@@ -92,6 +96,9 @@ function restartGame() {
   game.worms = FISH.worms;
   game.caughtCount = 0;
   game.totalWeight = 0;
+  game.trophies = [];
+  game.catches = [];
+  game.playTime = 0;
   game.bucketFish = [];
   game.campfirePending = false;
   game.campfireLit = false;
@@ -144,6 +151,9 @@ function rollFish() {
 function landFish() {
   game.caughtCount++;
   game.totalWeight += game.fishWeight;
+  game.catches.push({ fish: game.fish, weight: game.fishWeight });
+  // Редкие, элитные и эпические запоминаем - их покажут на экране итогов
+  if (game.rarity.id !== 'common') game.trophies.push({ fish: game.fish, weight: game.fishWeight, rarity: game.rarity });
 }
 
 // Попытка закончена: если в зоне не осталось рыбы - она переезжает в другое место.
@@ -189,6 +199,7 @@ function onControllerEvent(id, code = 0) {
   if (id === EV.FLAT) game.lastEvent += code ? ' ON' : ' OFF';
   game.lastEventTime = now;
 
+  if (settingsOpen) return;                   // открыты настройки (settings.js) - игра на паузе
   updateStickState(id, code);                 // stick.js - работает в любом состоянии
 
   const st = STATES[game.state];
@@ -198,6 +209,7 @@ function onControllerEvent(id, code = 0) {
 // Вызывается каждый кадр (~60 раз в секунду). dt - сколько секунд прошло с прошлого кадра
 function update(dt) {
   game.stateTime += dt;
+  if (game.state !== 'gameover' && game.state !== 'win') game.playTime += dt;   // таймер партии
   updateDaytime(dt);        // часы, рыба плещется (daytime.js)
   if (game.state !== 'gameover' && game.state !== 'win') {
     updateFloaters(dt);     // плавающие предметы

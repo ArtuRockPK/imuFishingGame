@@ -76,6 +76,10 @@ function drawBar(x, y, w, k, color) {
 
 // Червячки (жизни) в правом верхнем углу: живые - розовые, потерянные - тёмные.
 // Только что потерянный червячок мигает 1.5 секунды.
+// Заряд контроллера показываем в самом правом верхнем углу; червячки и вес под ним сдвигаются вниз
+function batteryShown() { return inputMode === 'ble' && battery !== null && game.state !== 'wait'; }
+function hudShift() { return batteryShown() ? 9 : 0; }
+
 function drawWorms(t) {
   const k = 2;                                  // увеличение спрайта
   const step = (WORM[0].length + 1) * k;
@@ -86,7 +90,7 @@ function drawWorms(t) {
     if (justLost && Math.floor(t * 8) % 2) continue;
     ctx.globalAlpha = alive || justLost ? 1 : 0.35;
     const wiggle = alive && Math.floor(t * 2 + i) % 2 ? -1 : 0;   // живые шевелятся
-    sprite(WORM, alive || justLost ? WORM_PAL : WORM_LOST_PAL, x0 + i * step, 13 + wiggle, WORM.length, false, k);
+    sprite(WORM, alive || justLost ? WORM_PAL : WORM_LOST_PAL, x0 + i * step, 13 + hudShift() + wiggle, WORM.length, false, k);
   }
   ctx.globalAlpha = 1;
 }
@@ -142,6 +146,57 @@ function drawLineAndFloat(s, st, tip) {
   }
 }
 
+// Значок батареи и проценты (на холсте текста, поэтому резкие и не темнеют ночью).
+// Правый край - перед первым червячком (drawWorms). Заливка: зелёная, жёлтая от 50%, красная от 20%
+function drawBattery(pct) {
+  const right = W - 4;                             // в самом углу, над червячками
+  const label = pct + '%';
+  hctx.font = '6px "Press Start 2P", "DotGothic16", monospace';
+  const tw = Math.ceil(hctx.measureText(label).width);
+  const bw = 12, bh = 6, y = 13;
+  const bx = right - tw - 3 - bw - 1;              // корпус батареи
+  const color = pct > 50 ? C.good : pct > 20 ? C.accent : C.bad;
+  hctx.fillStyle = C.text;                         // рамка и «пупырышек» справа, внутри прозрачно
+  hctx.fillRect(bx, y, bw, 1); hctx.fillRect(bx, y + bh - 1, bw, 1);
+  hctx.fillRect(bx, y, 1, bh); hctx.fillRect(bx + bw - 1, y, 1, bh);
+  hctx.fillRect(bx + bw, y + 2, 1, bh - 4);
+  hctx.fillStyle = color;
+  hctx.fillRect(bx + 2, y + 2, Math.max(1, Math.round((bw - 4) * Math.min(100, pct) / 100)), bh - 4);
+  text(label, right, y, pct > 20 ? C.text : C.bad, 'right', 6);   // белым, чтобы читалось; мало - красным
+}
+
+// Время партии: минуты:секунды (больше часа - часы:минуты:секунды)
+function formatPlayTime(sec) {
+  const s = Math.floor(sec), h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60;
+  const two = (n) => String(n).padStart(2, '0');
+  return (h ? h + ':' + two(m) : two(m)) + ':' + two(s % 60);
+}
+
+// Трофеи на экране итогов: рыбы редче обычной. До 5 строк в столбце, до двух столбцов,
+// остальные - строкой «ЕЩЁ N». Рыбки рисуются на сцене (drawTrophyFish), подписи - текстом
+const TROPHY = { y0: 96, row: 12, perCol: 5, cols: 2 };
+function trophySlots() {
+  const list = game.trophies.slice(0, TROPHY.perCol * TROPHY.cols);
+  const cols = list.length > TROPHY.perCol ? 2 : 1;
+  return list.map((tr, i) => ({
+    tr,
+    x: cols === 1 ? W / 2 - 50 : (i < TROPHY.perCol ? 40 : 175),
+    y: TROPHY.y0 + (i % TROPHY.perCol) * TROPHY.row,
+  }));
+}
+function drawTrophyFish() {
+  for (const sl of trophySlots()) drawFish(sl.tr.fish, sl.x, sl.y + 3, true);
+}
+function drawTrophyText() {
+  if (!game.trophies.length) return;
+  text(T('trophies_title'), W / 2, TROPHY.y0 - 14, C.accent, 'center', 8);
+  for (const sl of trophySlots()) {
+    text(`${T(sl.tr.fish.name)} ${sl.tr.weight.toFixed(2)} ${T('kg')}`, sl.x + 10, sl.y, sl.tr.rarity.frame, 'left', 6);
+  }
+  const more = game.trophies.length - TROPHY.perCol * TROPHY.cols;
+  if (more > 0) text(T('trophies_more', { n: more }), W / 2, TROPHY.y0 + TROPHY.perCol * TROPHY.row, C.text, 'center', 6);
+}
+
 // Весь текст поверх сцены
 function drawHud(s, st, photo) {
   const hint = hintFor(s);
@@ -161,33 +216,28 @@ function drawHud(s, st, photo) {
     text(T(game.rarity.name), W / 2, photo.captionY + 19, C.text, 'center', 8);
   }
 
-  // Прогресс к цели: сколько кг поймано из нужных; под ним часы
-  if (s !== 'wait') {
+  // Прогресс к цели: сколько кг поймано из нужных; под ним часы (на итогах не нужны - там свой текст)
+  if (s !== 'wait' && s !== 'gameover' && s !== 'win') {
     const done = game.totalWeight >= FISH.goalKg;
-    text(`${game.totalWeight.toFixed(1)}/${FISH.goalKg} ${T('kg')}`, W - 4, 36, done ? C.good : C.text, 'right');
-    text(clockText(), W - 4, 47, C.text, 'right', 6);
+    text(`${game.totalWeight.toFixed(1)}/${FISH.goalKg} ${T('kg')}`, W - 4, 36 + hudShift(), done ? C.good : C.text, 'right');
+    text(clockText(), W - 4, 47 + hudShift(), C.text, 'right', 6);
   }
 
   // Проигрыш / победа
   const result = T('result_line', { n: game.caughtCount, kg: game.totalWeight.toFixed(2) });
-  if (s === 'gameover' && st > 0.5) {
-    text(T('gameover_title'), W / 2, 58, C.bad, 'center', 12);
-    text(result, W / 2, 80, C.text);
-  }
-  if (s === 'win' && st > 0.5) {
-    text(T('win_title'), W / 2, 54, C.accent, 'center', 16);
-    text(result, W / 2, 80, C.text);
+  if ((s === 'gameover' || s === 'win') && st > 0.5) {
+    if (s === 'gameover') text(T('gameover_title'), W / 2, 34, C.bad, 'center', 12);
+    else text(T('win_title'), W / 2, 30, C.accent, 'center', 16);
+    text(result, W / 2, 56, C.text);
+    text(T('result_time', { t: formatPlayTime(game.playTime) }), W / 2, 68, C.text);
+    drawTrophyText();
   }
 
-  // Низ экрана: последнее событие стика справа, подсказки по управлению / состояние стика слева
-  if (now - game.lastEventTime < 1.2) text(game.lastEvent, W - 4, H - 11, C.accent, 'right');
-  if (inputMode === 'keyboard') {
-    text('SPC=TAP2 H=HI-G L=LO-G O=ORI R/T=REEL F=FLAT B=BLOW', 4, H - 11, C.text, 'left', 6);
-  } else if (inputMode === 'ble') {
-    const state = T(stick.still ? 'stick_still' : 'stick_moving');
-    text((battery !== null ? battery + '% ' : '') + state, 4, H - 11,
-         stickResting() ? C.good : C.text, 'left', 6);
-  }
+  // Таймер партии справа внизу
+  if (s !== 'wait') text(formatPlayTime(game.playTime), W - 4, H - 11, C.text, 'right', 8);
+
+  // Заряд контроллера: в самом правом верхнем углу, над червячками
+  if (batteryShown()) drawBattery(battery);
 
   if (showDebug && fishZone) {
     const left = s === 'waiting'
@@ -213,6 +263,17 @@ function draw(t, dt) {
     drawBucketScene(t, st);
     lightScene(L, t, { lift: 0.35 });
     drawHud(s, st, null);
+    return;
+  }
+
+  // Удержание рыбы посреди вываживания: вода сверху (balance.js)
+  if (s === 'fight' && game.balance && !game.balance.warn) {
+    drawBalanceScene(t, dt, st);
+    lightScene(L, t, { lift: 0.6 });          // ночью темнее, но рыбу должно быть видно
+    drawBalanceHud(t);
+    drawWorms(t);
+    drawHud(s, st, null);
+    drawBalanceText(t);
     return;
   }
 
@@ -296,6 +357,7 @@ function draw(t, dt) {
     ctx.globalAlpha = Math.min(0.55, st);
     rect(0, 0, W, H, '#000000');
     ctx.globalAlpha = 1;
+    if (st > 0.5) drawTrophyFish();           // рыбки-трофеи поверх затемнения
   }
 
   // Фото улова поверх всего

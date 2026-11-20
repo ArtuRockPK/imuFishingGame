@@ -26,6 +26,22 @@ body {
 #stage canvas { position: absolute; left: 0; top: 0; display: block; }
 #game { image-rendering: pixelated; image-rendering: crisp-edges; }
 
+/* Гаечка настроек в левом верхнем углу сцены */
+#gear {
+  position: absolute; left: 1%; top: 1.6%;
+  width: 5.5%; aspect-ratio: 1; padding: 0.8%;
+  border: 0; border-radius: 0; cursor: pointer;
+  background: rgba(0, 0, 0, .35); color: #fcfcfc;
+  box-shadow: inset -2px -2px 0 rgba(0,0,0,.35);
+}
+#gear:hover { background: rgba(0, 0, 0, .6); color: var(--accent); }
+#gear svg { display: block; width: 100%; height: 100%; }
+
+/* Окно настроек: заголовок пункта и пояснение под вариантами */
+.setting-title { font-size: 11px; color: var(--accent); text-align: left; margin: 4px 0 10px; line-height: 1.6; }
+.setting-note { font-size: 8px !important; text-align: left; margin: -4px 0 18px !important; }
+.setting-title:lang(zh), .setting-title:lang(ja) { font-size: 15px; }
+
 /* Окно "Подключить контроллер" / "Пауза" */
 .overlay {
   position: fixed; inset: 0;
@@ -45,7 +61,7 @@ body {
   text-align: center;
 }
 .card h1 { font-size: 20px; margin: 0 0 20px; color: var(--accent); line-height: 1.4; }
-.card p { font-size: 10px; line-height: 1.8; color: var(--muted); margin: 0 0 16px; }
+.card p { font-size: 10px; line-height: 1.8; color: var(--muted); margin: 0 0 16px; white-space: pre-line; }
 .card button {
   display: block; width: 100%;
   font: inherit; font-size: 12px;
@@ -67,5 +83,20 @@ body {
 #overlayStatus:lang(zh), #overlayStatus:lang(ja) { font-size: 14px; }
 .card button:disabled { opacity: .5; cursor: default; }
 
+/* Настройка контроллера: номер шага над заголовком, ролик с жестом, полоска прогресса катушки */
+.card h1[data-step]::before {
+  content: attr(data-step); display: block;
+  font-size: 9px; color: var(--muted); margin-bottom: 10px;
+}
+#overlayVideo {
+  display: block; width: 220px; max-width: 100%; aspect-ratio: 9 / 10;
+  margin: 0 auto 16px; background: #000; border: 4px solid var(--border); object-fit: cover;
+}
+#overlayBar { height: 12px; background: #000; border: 2px solid var(--border); margin: 0 0 16px; }
+#overlayBar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+
 #overlayStatus { min-height: 18px; font-size: 10px; color: var(--muted); margin: 4px 0 0; }
 #overlayStatus.err { color: var(--err); }
+/* «Есть!» в настройке контроллера: жест сделан правильно */
+#overlayStatus.ok { color: #58d854; font-size: 18px; margin-top: 8px; }
+#overlayStatus.ok:lang(zh), #overlayStatus.ok:lang(ja) { font-size: 24px; }

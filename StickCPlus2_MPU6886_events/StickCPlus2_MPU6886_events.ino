@@ -41,11 +41,17 @@
  *            REEL: скорость вращения в десятых оборота в секунду;
  *            пакет состояния 0xFF: 1 = стик сейчас лежит плашмя; иначе 0
  *     [2]    порядковый номер события (uint8); дырка в нумерации = событие потеряно
- *     [3]    резерв (0)
+ *     [3]    REEL: направление вращения в осях датчика (как у HIGH-G): биты 0-1 ось (0=X, 1=Y, 2=Z),
+ *            как крутят: бит 5 = твист (стик вращается вокруг своей оси),
+ *            бит 4 = круг по акселерометру, ни того ни другого = круг по гироскопу;
+ *            бит 6 = направление известно, бит 7 = знак минус. Без бита 6 остальные биты
+ *            всё равно содержат лучшую догадку (для диагностики). Иначе 0
  *     [4..7] время на стике, мс (uint32)
  *            BLOW: сила выдоха 1..255 (начало), 0 - выдох закончился;
+ *            BUTTON (id 12): 1 = нажата кнопка A;
  *     [8..9] у REEL - сколько оборотов с включения катушки, в сотых (uint16); иначе 0
- *     [10..11] резерв (0)
+ *     [10]   REEL: сила лучшего способа определения направления, рад x40 (диагностика); иначе 0
+ *     [11]   REEL: доля главной оси в нём, % (диагностика); иначе 0
  *   характеристика команд BLE_CMD_UUID (write), 1 байт:
  *     BLE_CMD_REEL_ON (1) - включить катушку, BLE_CMD_REEL_OFF (0) - выключить,
  *     BLE_CMD_MIC_ON (3) - включить микрофон, BLE_CMD_MIC_OFF (2) - выключить
@@ -80,6 +86,8 @@ struct ImuEvent {
   uint8_t  code;         // код подробности для BLE (см. протокол в шапке)
   uint8_t  seq;          // порядковый номер BLE-пакета
   uint16_t extra;        // доп. данные для байтов 8..9 (REEL: обороты x100)
+  uint8_t  aux;          // байт 3 (REEL: направление вращения, см. протокол в шапке)
+  uint16_t diag;         // байты 10..11 (REEL: диагностика направления)
   char     detail[12];   // подробность для плитки ("" если нет)
 };
 
@@ -140,6 +148,9 @@ const float    REEL_SMOOTH      = 0.4f;   // сглаживание разгон
 const float    REEL_SMOOTH_DOWN = 0.8f;   // сглаживание остановки: ближе к 1 - скорость падает почти сразу
 const float    REEL_MIN_SPEED   = 0.1f;   // медленнее (об/с) - считаем, что не крутят
 const uint32_t REEL_STOP_MS     = 80;     // гироскоп не видит вращения столько мс - сразу шлём скорость 0
+const float    REEL_DIR_MIN     = 0.5f;   // согласованного вращения меньше (рад, ~30 град) - направление непонятно
+const float    REEL_DIR_KEEP    = 0.5f;   // память направления между отправками: 0.5 = примерно последние 0.2 с
+const float    REEL_DIR_CLEAR   = 0.5f;   // на главную ось должна приходиться эта доля вектора, иначе непонятно
 
 // MPU6886: регистр PWR_MGMT_2 - режим ожидания гироскопа (экономия, пока не нужна катушка)
 const uint8_t  MPU_ADDR        = 0x68;
@@ -157,6 +168,7 @@ enum EventId : uint8_t {
   EV_ORIENT,
   EV_REEL,          // 10 (раньше этот номер был у STEP)
   EV_BLOW,          // 11 - игрок дует в микрофон (раньше номер был у ACTIVITY)
+  EV_BTN,           // 12 - кнопка: нажата A
   EV_COUNT
 };
 
@@ -179,6 +191,7 @@ const EventDef EVENTS[EV_COUNT] = {
   { "ORIENT",   TFT_GREENYELLOW },
   { "REEL",     TFT_GREEN },   // катушка: скорость вращения
   { "BLOW",     TFT_YELLOW },  // дуют в микрофон: сила
+  { "BUTTON",   TFT_LIGHTGREY },  // нажата кнопка (игра может выбирать ею место заброса)
 };
 const int EVENT_COUNT = EV_COUNT;
 
@@ -248,12 +261,15 @@ bool isFrequentEvent(uint8_t idx) {
   return idx == EV_ANY_MOT || idx == EV_NO_MOT;
 }
 
-void sendEvent(uint8_t idx, const char* detail = "", uint8_t code = 0, uint16_t extra = 0) {
+void sendEvent(uint8_t idx, const char* detail = "", uint8_t code = 0, uint16_t extra = 0,
+               uint8_t aux = 0, uint16_t diag = 0) {
   ImuEvent ev;
   ev.t = millis();
   ev.idx = idx;
   ev.code = code;
   ev.extra = extra;
+  ev.aux = aux;
+  ev.diag = diag;
   strlcpy(ev.detail, detail, sizeof(ev.detail));
   if (idx == EV_REEL) {}       // REEL идёт 10 раз в секунду - в лог не пишем
   else if (detail[0]) LOG("[%lu ms] %s (%s)\n", (unsigned long)ev.t, EVENTS[idx].name, detail);
@@ -463,6 +479,10 @@ struct ReelState {
   float    turns = 0;                    // оборотов с включения
   uint8_t  lastCode = 0;
   uint32_t lastSpinMs = 0;              // когда гироскоп последний раз видел вращение
+  float    nx = 0, ny = 0, nz = 0;       // сумма вращения, град (итоговый поворот: направление твиста)
+  float    kx = 0, ky = 0, kz = 0;       // сумма векторных произведений отсчётов ускорения (круг по акселерометру)
+  float    cx = 0, cy = 0, cz = 0;       // сумма векторных произведений отсчётов гироскопа (направление круга)
+  uint32_t lastDirMs = 0;
 };
 ReelState reel;   // только из imuTask
 
@@ -470,7 +490,7 @@ void reelStart(uint32_t now, float ax, float ay, float az) {
   if (!setGyro(true)) { reelWanted = false; return; }
   reel = ReelState();
   reel.on = true;
-  reel.startMs = reel.lastSendMs = now;
+  reel.startMs = reel.lastSendMs = reel.lastDirMs = now;
   reel.gx = ax; reel.gy = ay; reel.gz = az;
   LOG("[%lu ms] REEL on\n", (unsigned long)now);
 }
@@ -483,6 +503,66 @@ void reelStop(const char* why) {
   LOG("[%lu ms] REEL off (%s), %.1f turns\n", (unsigned long)millis(), why, reel.turns);
 }
 
+// Направление вращения (байт 3 у REEL). Крутить стик можно двумя способами:
+// - твист: стик вращается вокруг своей оси, угловая скорость всё время смотрит в одну сторону -
+//   направление = знак суммы вращения (nx, ny, nz);
+// - круг: кисть описывает круг. Если стик при этом наклоняется, угловая скорость ходит по кругу -
+//   направление = ось этого круга: сумма векторных произведений соседних отсчётов (cx, cy, cz).
+//   Если стик ездит по кругу, не наклоняясь (как ручка настоящей катушки), гироскоп видит
+//   только покачивание, зато по кругу ходит ускорение - та же сумма для него (kx, ky, kz, reelTrackAcc).
+// reelDir выбирает самый чёткий из трёх.
+void reelTrackDir(uint32_t now, float wx, float wy, float wz) {
+  float dt = (now - reel.lastDirMs) / 1000.0f;
+  reel.lastDirMs = now;
+  float m = sqrtf(wx * wx + wy * wy + wz * wz);
+  if (m < REEL_MIN_DPS || dt > 0.1f) return;
+  reel.nx += wx * dt; reel.ny += wy * dt; reel.nz += wz * dt;
+  if (reel.gyro.have) {   // прошлый отсчёт тоже был сильным
+    float k = 1.0f / (reel.gyro.pm * m);
+    reel.cx += (reel.gyro.py * wz - reel.gyro.pz * wy) * k;
+    reel.cy += (reel.gyro.pz * wx - reel.gyro.px * wz) * k;
+    reel.cz += (reel.gyro.px * wy - reel.gyro.py * wx) * k;
+  }
+}
+
+// Круг по акселерометру: векторные произведения соседних отсчётов ускорения без гравитации
+// (вызывается до reel.acc.add, поэтому в reel.acc ещё прошлый отсчёт)
+void reelTrackAcc(float lx, float ly, float lz) {
+  float m = sqrtf(lx * lx + ly * ly + lz * lz);
+  if (m < REEL_MIN_ACC_G || !reel.acc.have) return;
+  float k = 1.0f / (reel.acc.pm * m);
+  reel.kx += (reel.acc.py * lz - reel.acc.pz * ly) * k;
+  reel.ky += (reel.acc.pz * lx - reel.acc.px * lz) * k;
+  reel.kz += (reel.acc.px * ly - reel.acc.py * lx) * k;
+}
+
+// Код направления для пакета; старое вращение постепенно забывается
+uint8_t reelDir(uint8_t& cand, uint16_t& diag) {
+  float tw = sqrtf(reel.nx * reel.nx + reel.ny * reel.ny + reel.nz * reel.nz) * (PI / 180);
+  float gc = sqrtf(reel.cx * reel.cx + reel.cy * reel.cy + reel.cz * reel.cz);
+  float ac = sqrtf(reel.kx * reel.kx + reel.ky * reel.ky + reel.kz * reel.kz);
+  // Побеждает самый чёткий способ: все три - "согласованное вращение в радианах"
+  float v[3];
+  uint8_t mode;
+  float best;
+  if (tw >= gc && tw >= ac) { v[0] = reel.nx; v[1] = reel.ny; v[2] = reel.nz; mode = 0x20; best = tw; }
+  else if (ac >= gc)        { v[0] = reel.kx; v[1] = reel.ky; v[2] = reel.kz; mode = 0x10; best = ac; }
+  else                      { v[0] = reel.cx; v[1] = reel.cy; v[2] = reel.cz; mode = 0;    best = gc; }
+  // Старую часть забываем, чтобы смена направления была видна примерно за 0.2 с
+  reel.nx *= REEL_DIR_KEEP; reel.ny *= REEL_DIR_KEEP; reel.nz *= REEL_DIR_KEEP;
+  reel.cx *= REEL_DIR_KEEP; reel.cy *= REEL_DIR_KEEP; reel.cz *= REEL_DIR_KEEP;
+  reel.kx *= REEL_DIR_KEEP; reel.ky *= REEL_DIR_KEEP; reel.kz *= REEL_DIR_KEEP;
+  int axis = 0;
+  for (int i = 1; i < 3; i++) if (fabsf(v[i]) > fabsf(v[axis])) axis = i;
+  float share = best > 0 ? fabsf(v[axis]) / best : 0;
+  // Диагностика для тестовой страницы: сила победившего способа (рад x40) и доля главной оси (%)
+  diag = (uint16_t)fminf(255, best * 40) | (uint16_t)(share * 100 + 0.5f) << 8;
+  cand = mode | (v[axis] < 0 ? 0x80 : 0) | axis;   // лучшая догадка, уходит даже когда направление непонятно
+  if (best < REEL_DIR_MIN) return 0;   // согласованного вращения слишком мало
+  if (share < REEL_DIR_CLEAR) return 0;   // главной оси нет
+  return 0x40 | cand;
+}
+
 void reelUpdate(uint32_t now, float ax, float ay, float az) {
   float gx, gy, gz;
   if (!M5.Imu.getGyro(&gx, &gy, &gz)) { i2cErrors++; return; }
@@ -490,7 +570,9 @@ void reelUpdate(uint32_t now, float ax, float ay, float az) {
   reel.gx += (ax - reel.gx) * REEL_GRAVITY_K;
   reel.gy += (ay - reel.gy) * REEL_GRAVITY_K;
   reel.gz += (az - reel.gz) * REEL_GRAVITY_K;
+  reelTrackAcc(ax - reel.gx, ay - reel.gy, az - reel.gz);
   reel.acc.add(ax - reel.gx, ay - reel.gy, az - reel.gz, REEL_MIN_ACC_G);
+  reelTrackDir(now, gx, gy, gz);
   reel.gyro.add(gx, gy, gz, REEL_MIN_DPS);
   if (reel.gyro.have) reel.lastSpinMs = now;   // have = вращение быстрее REEL_MIN_DPS
   bool spinning = now - reel.lastSpinMs < REEL_STOP_MS;
@@ -524,8 +606,13 @@ void reelUpdate(uint32_t now, float ax, float ay, float az) {
   if (code == 0 && reel.lastCode == 0) return;   // не крутят - эфир не засоряем
   reel.lastCode = code;
   char d[12];
-  snprintf(d, sizeof(d), "%.1f t/s", reel.speed);
-  sendEvent(EV_REEL, code ? d : "STOP", code, (uint16_t)fminf(65535, reel.turns * 100));
+  uint8_t cand = 0;
+  uint16_t diag = 0;
+  uint8_t dir = code ? reelDir(cand, diag) : 0;
+  snprintf(d, sizeof(d), "%.1f %c%c%c", reel.speed, dir ? "XYZ"[dir & 3] : '?',
+           !dir ? ' ' : (dir & 0x80 ? '-' : '+'), !dir ? ' ' : (dir & 0x20 ? 't' : (dir & 0x10 ? 'a' : 'g')));
+  sendEvent(EV_REEL, code ? d : "STOP", code, (uint16_t)fminf(65535, reel.turns * 100),
+            dir ? dir : cand, diag);
 }
 
 // ---------- Задача FreeRTOS: опрос MPU6886 и распознавание ----------
@@ -710,14 +797,15 @@ BLECharacteristic* addNotifyCharacteristic(BLEService* svc, BLEUUID uuid) {
   return c;
 }
 
-void packEvent(uint8_t* p, uint8_t id, uint8_t code, uint8_t seq, uint32_t t, uint16_t extra = 0) {
+void packEvent(uint8_t* p, uint8_t id, uint8_t code, uint8_t seq, uint32_t t, uint16_t extra = 0,
+               uint8_t aux = 0, uint16_t diag = 0) {
   p[0] = id;
   p[1] = code;
   p[2] = seq;
-  p[3] = 0;
+  p[3] = aux;
   memcpy(p + 4, &t, 4);       // ESP32 - little-endian
   memcpy(p + 8, &extra, 2);
-  p[10] = p[11] = 0;          // резерв
+  memcpy(p + 10, &diag, 2);
 }
 
 void bleTask(void*) {
@@ -762,7 +850,7 @@ void bleTask(void*) {
     if (xQueueReceive(bleQueue, &ev, pdMS_TO_TICKS(1000)) == pdTRUE) {
       // Пока никто не подключён, события просто выбрасываем
       if (bleConnected) {
-        packEvent(pkt, ev.idx, ev.code, ev.seq, ev.t, ev.extra);
+        packEvent(pkt, ev.idx, ev.code, ev.seq, ev.t, ev.extra, ev.aux, ev.diag);
         evtChar->setValue(pkt, sizeof(pkt));
         evtChar->notify();
       }
@@ -921,6 +1009,8 @@ void loop() {
     M5.Display.setBrightness(0);
     M5.Power.powerOff();
   }
+  // Кнопка A уходит в игру как BUTTON (кто-то выбирает ею место заброса вместо двойного тапа)
+  if (M5.BtnA.wasPressed()) sendEvent(EV_BTN, "A", 1);
   // Любая кнопка включает экран ещё на SCREEN_TIMEOUT_MS
   if (M5.BtnA.wasPressed() || M5.BtnB.wasPressed() || M5.BtnPWR.wasPressed()) {
     lastActivityMs = now;

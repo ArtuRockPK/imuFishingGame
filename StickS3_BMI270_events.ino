@@ -1,81 +1,87 @@
 /*
- * M5StickS3 + BMI270: BLE-контроллер на встроенных событиях распознавания
+ * M5StickS3 + BMI270: BLE controller built on the sensor's on-chip gesture recognition
  *
- * Библиотеки (Arduino Library Manager):
- *   - M5Unified (свежая версия, там исправлена ориентация IMU для StickS3)
+ * Libraries (Arduino Library Manager):
+ *   - M5Unified (a recent version: it has the IMU orientation fix for StickS3)
  *   - M5GFX
- *   - SparkFun BMI270 Arduino Library (используется только встроенный в неё Bosch BMI270 API)
- *   - BLE - входит в ядро ESP32
+ *   - SparkFun BMI270 Arduino Library (only the Bosch BMI270 API bundled in it is used)
+ *   - BLE - part of the ESP32 core
  *
- * Плата в Arduino IDE: M5StickS3 (пакет M5Stack).
- * Для вывода в Serial Monitor: Tools -> USB CDC On Boot: Enabled,
- *                               Tools -> USB Mode: Hardware CDC and JTAG.
- * Для работы от батареи отладку можно выключить: DEBUG_LOG 0.
+ * Board in Arduino IDE: M5StickS3 (M5Stack package).
+ * For Serial Monitor output: Tools -> USB CDC On Boot: Enabled,
+ *                            Tools -> USB Mode: Hardware CDC and JTAG.
+ * On battery the debug log can be turned off: DEBUG_LOG 0.
  *
- * Прошивка датчика: "legacy" конфиг Bosch (bmi270_legacy). В нём есть тапы
- * (одиночный/двойной/тройной), ориентация, flat, high-g, low-g, но нет жестов запястья.
- * SparkFun-обёртка умеет грузить только основной конфиг, поэтому датчик ведётся
- * напрямую через Bosch API (bmi270_legacy_*).
+ * Sensor firmware: Bosch "legacy" config (bmi270_legacy). It has taps
+ * (single/double/triple), orientation, flat, high-g, low-g, but no wrist gestures.
+ * The SparkFun wrapper can only load the main config, so the sensor is driven
+ * directly through the Bosch API (bmi270_legacy_*).
  *
- * События читаются опросом регистра статуса прерываний по I2C.
- * Вывод INT1 у BMI270 на StickS3 идёт на M5PM1, а не напрямую на ESP32-S3,
- * поэтому опрос по I2C здесь проще и надёжнее.
+ * Events are read by polling the interrupt status register over I2C.
+ * On StickS3 the BMI270 INT1 pin goes to the M5PM1, not straight to the ESP32-S3,
+ * so I2C polling is simpler and more reliable here.
  *
- * ВАЖНО про I2C: BMI270 сидит на внутренней шине (SDA=47, SCL=48) вместе с M5PM1.
- * M5Unified ведёт эту шину своим драйвером M5.In_I2C (контроллер I2C1) и при КАЖДОЙ
- * транзакции заново подключает пины 47/48 к I2C1 (например, M5.update() опрашивает
- * кнопку питания через PM1). Если поднять Arduino Wire (I2C0) на тех же пинах,
- * то после первого же M5.update() пины "уводятся" у Wire, и все чтения BMI270
- * молча перестают работать. Поэтому все обращения к BMI270 идут через M5.In_I2C
- * (у него внутри мьютекс, так что обращаться к шине из разных задач безопасно).
+ * IMPORTANT about I2C: the BMI270 sits on the internal bus (SDA=47, SCL=48) together with the M5PM1.
+ * M5Unified drives this bus with its own M5.In_I2C driver (I2C1 controller) and on EVERY
+ * transaction re-attaches pins 47/48 to I2C1 (e.g. M5.update() polls the power button
+ * through the PM1). If Arduino Wire (I2C0) is started on the same pins, the very first
+ * M5.update() "steals" the pins from Wire, and all BMI270 reads silently stop working.
+ * That is why every BMI270 access goes through M5.In_I2C (it has an internal mutex,
+ * so using the bus from different tasks is safe).
  *
- * Задачи FreeRTOS:
- *   imuTask (ядро 0) - опрос BMI270, кладёт события в две очереди: экран и BLE;
- *   bleTask (ядро 0) - BLE GATT-сервер, отправляет события уведомлениями и уровень батареи;
- *   micTask (ядро 0) - микрофон по команде игры: распознаёт, что в стик дуют (BLOW);
- *   loop()  (ядро 1) - экран и кнопки.
- * Задачи общаются только через очереди и atomic-переменные.
+ * FreeRTOS tasks:
+ *   imuTask (core 0) - polls the BMI270, puts events into two queues: screen and BLE;
+ *   bleTask (core 0) - BLE GATT server, sends events as notifications plus the battery level;
+ *   micTask (core 0) - microphone on game request: detects blowing into the stick (BLOW);
+ *   loop()  (core 1) - screen and buttons.
+ * Tasks talk to each other only through queues and atomic variables.
  *
- * BLE-протокол (сервис BLE_SERVICE_UUID):
- *   характеристика событий BLE_EVENT_UUID (read + notify), 12 байт, little-endian:
- *     [0]    id события (EventId), 0xFF = пакет состояния (при подключении)
- *     [1]    код подробности: ORIENT 0..3 (PORT UP, LAND L, PORT DN, LAND R),
- *            HIGH-G: биты 0-1 ось (0=X, 1=Y, 2=Z, 3=?), бит 7 = знак минус;
- *            FLAT: 1 = стик лежит плашмя, 0 = поднят (шлётся при смене, считается по акселерометру);
- *            пакет состояния 0xFF: 1 = стик сейчас лежит плашмя; иначе 0
- *     [2]    порядковый номер события (uint8); дырка в нумерации = событие потеряно
- *            на стике (переполнилась BLE-очередь). У пакета состояния не учитывается.
- *            ANY/NO MOTION отправляются не чаще BLE_THROTTLE_MS.
- *     [3]    резерв (0)
- *     [4..7] время на стике, мс (uint32)
- *            BLOW: сила выдоха 1..255 (начало), 0 - выдох закончился;
- *     [8..9] у REEL - сколько оборотов с включения катушки, в сотых (uint16); иначе 0
- *     [10..11] резерв (0)
- *   характеристика команд BLE_CMD_UUID (write), 1 байт:
- *     BLE_CMD_REEL_ON (1) - включить катушку, BLE_CMD_REEL_OFF (0) - выключить,
- *     BLE_CMD_MIC_ON (3) - включить микрофон, BLE_CMD_MIC_OFF (2) - выключить
- *   стандартный Battery Service 0x180F / 0x2A19 (read + notify), %.
+ * BLE protocol (service BLE_SERVICE_UUID):
+ *   event characteristic BLE_EVENT_UUID (read + notify), 12 bytes, little-endian:
+ *     [0]    event id (EventId), 0xFF = state packet (sent on connect)
+ *     [1]    detail code: ORIENT 0..3 (PORT UP, LAND L, PORT DN, LAND R),
+ *            HIGH-G: bits 0-1 axis (0=X, 1=Y, 2=Z, 3=?), bit 7 = minus sign;
+ *            FLAT: 1 = stick lies flat, 0 = picked up (sent on change, computed from the accelerometer);
+ *            BLOW: blow strength 1..255 (start), 0 = blow ended;
+ *            BUTTON (id 12): 1 = button A pressed;
+ *            state packet 0xFF: 1 = stick is lying flat right now; otherwise 0
+ *     [2]    event sequence number (uint8); a gap in numbering = an event was lost
+ *            on the stick (BLE queue overflow). Not counted for the state packet.
+ *            ANY/NO MOTION are sent no more often than BLE_THROTTLE_MS.
+ *     [3]    REEL: spin direction in sensor axes (like HIGH-G): bits 0-1 axis (0=X, 1=Y, 2=Z),
+ *            how it is spun: bit 5 = twist (the stick turns around its own axis),
+ *            bit 4 = circle seen by the accelerometer, neither = circle seen by the gyroscope;
+ *            bit 6 = direction is known, bit 7 = minus sign. Without bit 6 the other bits
+ *            still hold the best guess (for diagnostics). Otherwise 0
+ *     [4..7] stick time, ms (uint32)
+ *     [8..9] for REEL - turns since the reel was enabled, in hundredths (uint16); otherwise 0
+ *     [10]   REEL: strength of the best direction method, rad x40 (diagnostics); otherwise 0
+ *     [11]   REEL: share of the main axis in it, % (diagnostics); otherwise 0
+ *   command characteristic BLE_CMD_UUID (write), 1 byte:
+ *     BLE_CMD_REEL_ON (1) - enable the reel, BLE_CMD_REEL_OFF (0) - disable,
+ *     BLE_CMD_MIC_ON (3) - enable the microphone, BLE_CMD_MIC_OFF (2) - disable
+ *   standard Battery Service 0x180F / 0x2A19 (read + notify), %.
  *
- * Катушка (REEL, id 10): игра включает её на время вываживания. Пока она включена,
- * работает гироскоп, и раз в REEL_SEND_MS приходит REEL: код = скорость вращения стика
- * кистью в десятых оборота в секунду (15 = 1.5 об/с), направление не важно.
- * Когда стик перестали крутить, приходит один REEL с кодом 0, дальше тишина.
+ * Reel (REEL, id 10): the game enables it while playing a fish. While it is on,
+ * the gyroscope runs, and every REEL_SEND_MS a REEL arrives: code = speed of twisting
+ * the stick with the wrist in tenths of a turn per second (15 = 1.5 rev/s), direction does not matter.
+ * When the stick stops spinning, one REEL with code 0 arrives, then silence.
  *
- * Энергосбережение: CPU 80 МГц, выключены динамик, микрофон (работает только по команде игры), RTC, 5V-выход, светодиод,
- * гироскоп работает только пока включена катушка (REEL), BLE TX 0 дБм, редкий advertising, экран притушен.
- * Экран горит SCREEN_TIMEOUT_MS после включения или нажатия кнопки и гаснет; события
- * датчика его не будят, включить заново можно только кнопкой.
+ * Power saving: CPU 80 MHz; speaker, microphone (runs only on game request), RTC, 5V output and LED are off;
+ * the gyroscope runs only while the reel (REEL) is on; BLE TX 0 dBm, slow advertising, dimmed screen.
+ * The screen stays on for SCREEN_TIMEOUT_MS after power-on or a button press, then turns off;
+ * sensor events do not wake it, only a button does.
  *
- * Микрофон (BLOW, id 11): игра включает его на время ночного костра. Пока он включён,
- * громкий выдох дольше BLOW_START_MS даёт BLOW с силой, конец выдоха - BLOW с кодом 0
- * (см. micTask). Номер 11 раньше был у ACTIVITY - шагомер не используется и не включается.
+ * Microphone (BLOW, id 11): the game enables it for the night campfire. While it is on,
+ * a loud blow longer than BLOW_START_MS gives a BLOW with its strength, the end of the blow gives
+ * a BLOW with code 0 (see micTask). Id 11 used to be ACTIVITY - the step counter is unused and never enabled.
  *
- * Экран: сверху имя стика и статус BLE/батареи, ниже плитки всех событий.
- * Неактивная плитка - бледная, при событии подсвечивается его цветом и гаснет через 1.5 с.
- * У ORIENT и HIGH-G на подсвеченной плитке показывается подробность.
+ * Screen: stick name and BLE/battery status on top, tiles for all events below.
+ * An inactive tile is dim; on an event it lights up in its color and fades after 1.5 s.
+ * ORIENT and HIGH-G tiles show the detail while lit.
  *
- * Любая кнопка: нажатие - включить экран на SCREEN_TIMEOUT_MS.
- * Кнопка A (большая, передняя): удержание 2 с - выключить питание.
+ * Any button: press - turn the screen on for SCREEN_TIMEOUT_MS.
+ * Button A (big, front): hold 2 s - power off.
  */
 
 #include <M5Unified.h>
@@ -83,7 +89,7 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLE2902.h>
-#include "SparkFun_BMI270_Arduino_Library.h"   // нужен, чтобы IDE подключила библиотеку с Bosch API
+#include "SparkFun_BMI270_Arduino_Library.h"   // needed so the IDE links the library with the Bosch API
 #include "bmi270_api/bmi270_legacy.h"
 
 #define DEBUG_LOG 1
@@ -93,18 +99,20 @@
 #define LOG(...) do {} while (0)
 #endif
 
-// Событие из задачи IMU в loop() и bleTask. Объявлено до первой функции: Arduino IDE
-// вставляет автопрототипы (addEvent(const ImuEvent&)) перед первой функцией скетча.
+// Event from the IMU task to loop() and bleTask. Declared before the first function: the Arduino IDE
+// inserts auto-prototypes (addEvent(const ImuEvent&)) before the sketch's first function.
 struct ImuEvent {
   uint32_t t;
   uint8_t  idx;          // EventId
-  uint8_t  code;         // код подробности для BLE (см. протокол в шапке)
-  uint8_t  seq;          // порядковый номер BLE-пакета
-  uint16_t extra;        // доп. данные для байтов 8..9 (REEL: обороты x100)
-  char     detail[12];   // подробность для плитки ("" если нет)
+  uint8_t  code;         // detail code for BLE (see the protocol in the header)
+  uint8_t  seq;          // BLE packet sequence number
+  uint16_t extra;        // extra data for bytes 8..9 (REEL: turns x100)
+  uint8_t  aux;          // byte 3 (REEL: spin direction, see the protocol in the header)
+  uint16_t diag;         // bytes 10..11 (REEL: direction diagnostics)
+  char     detail[12];   // tile detail ("" if none)
 };
 
-// ---------- Настройки ----------
+// ---------- Settings ----------
 const char*    BLE_NAME         = "StickS3-Rod";
 const char*    BLE_SERVICE_UUID = "b5e10001-6d2a-4c8e-9f3b-1a7c5e2d9f40";
 const char*    BLE_EVENT_UUID   = "b5e10002-6d2a-4c8e-9f3b-1a7c5e2d9f40";
@@ -115,46 +123,49 @@ const uint8_t  BLE_CMD_REEL_ON  = 0x01;
 const uint8_t  BLE_CMD_MIC_OFF  = 0x02;
 const uint8_t  BLE_CMD_MIC_ON   = 0x03;
 const uint32_t BATTERY_PERIOD_MS = 60000;
-const uint32_t SCREEN_TIMEOUT_MS = 10000;  // экран гаснет через столько после включения / нажатия кнопки
+const uint32_t SCREEN_TIMEOUT_MS = 10000;  // screen turns off this long after power-on / a button press
 const uint8_t  SCREEN_BRIGHTNESS = 60;     // 0..255
 const uint32_t IMU_POLL_MS       = 25;
-const uint32_t BLE_THROTTLE_MS   = 500;    // ANY/NO MOTION в BLE не чаще этого
-const uint32_t FLAT_CHECK_MS     = 200;    // как часто проверять, лежит ли стик
-const float    FLAT_ON_Z_G       = 0.90f;  // |z| больше - стик положили плашмя
-const float    FLAT_OFF_Z_G      = 0.75f;  // |z| меньше - стик подняли (гистерезис от дребезга)
+const uint32_t BLE_THROTTLE_MS   = 500;    // ANY/NO MOTION to BLE no more often than this
+const uint32_t FLAT_CHECK_MS     = 200;    // how often to check whether the stick is lying flat
+const float    FLAT_ON_Z_G       = 0.90f;  // |z| above this - the stick was laid flat
+const float    FLAT_OFF_Z_G      = 0.75f;  // |z| below this - the stick was picked up (hysteresis against bouncing)
 
-// Настройка тапов (подбираются опытным путём, текущие значения печатаются в Serial при старте).
-// Тап ловится только по ОДНОЙ оси: на StickS3 Z - стук по экрану/задней крышке,
-// X и Y - стук по торцам/бокам корпуса.
-const int   TAP_AXIS            = 2;      // 0 = X, 1 = Y, 2 = Z, -1 = оставить как в прошивке Bosch
-const float TAP_THRESHOLD_SCALE = 0.6f;   // множитель порога: < 1 - чувствительнее, > 1 - грубее, 1 - как было
-const float TAP_GESTURE_SCALE   = 1.5f;   // множитель окна между тапами: > 1 - двойной/тройной можно стучать медленнее
+// Tap tuning (found by experiment; current values are printed to Serial at startup).
+// A tap is detected on ONE axis only: on StickS3 Z = knocking on the screen/back cover,
+// X and Y = knocking on the ends/sides of the case.
+const int   TAP_AXIS            = 2;      // 0 = X, 1 = Y, 2 = Z, -1 = keep the Bosch firmware default
+const float TAP_THRESHOLD_SCALE = 0.6f;   // threshold multiplier: < 1 - more sensitive, > 1 - less sensitive, 1 - default
+const float TAP_GESTURE_SCALE   = 1.5f;   // multiplier of the window between taps: > 1 - double/triple taps can be slower
 
-// Настройка ориентации (ORIENT). По умолчанию у Bosch blocking = 3 - самая строгая
-// блокировка: пока стик быстро движется или наклонён больше ORIENT_THETA, смена
-// ориентации не засчитывается. При вываживании стик как раз крутят, и повороты терялись.
-const int   ORIENT_BLOCKING     = 1;      // 0 - без блокировки, 1 - только по углу, 2/3 - по углу и движению; -1 - как в прошивке Bosch
-const float ORIENT_HYST_SCALE   = 1.5f;   // множитель гистерезиса (по умолчанию 0.0625 g): < 1 - срабатывает раньше, но может дребезжать
+// Orientation (ORIENT) tuning. Bosch default is blocking = 3, the strictest
+// blocking: while the stick moves fast or is tilted more than ORIENT_THETA, an orientation
+// change is not counted. While playing a fish the stick is being twisted, so turns got lost.
+const int   ORIENT_BLOCKING     = 1;      // 0 - no blocking, 1 - by angle only, 2/3 - by angle and motion; -1 - Bosch firmware default
+const float ORIENT_HYST_SCALE   = 1.5f;   // hysteresis multiplier (default 0.0625 g): < 1 - triggers earlier but may bounce
 
-// Настройка HIGH-G (рывок удочкой). По умолчанию у Bosch порог 4.9 g на 20 мс - под это
-// попадают и резкие короткие удары тапа. Рывок слабее, но длиннее тапа, поэтому порог ниже,
-// а время больше: короткий удар тапа до HIGH-G не дотягивает.
-const float    HIGH_G_THRESHOLD_G = 3.0f;   // порог ускорения, g (по умолчанию 4.9)
-const uint16_t HIGH_G_DURATION_MS = 50;     // сколько держаться выше порога, мс (по умолчанию 20, шаг 5)
+// HIGH-G (rod jerk) tuning. Bosch default is 4.9 g for 20 ms - sharp short tap knocks
+// also match that. A jerk is weaker but longer than a tap, so the threshold is lower
+// and the duration longer: a short tap knock does not reach HIGH-G.
+const float    HIGH_G_THRESHOLD_G = 3.0f;   // acceleration threshold, g (default 4.9)
+const uint16_t HIGH_G_DURATION_MS = 50;     // how long to stay above the threshold, ms (default 20, step 5)
 
-// Катушка (REEL) при вываживании: см. reelUpdate(). Подбираются опытным путём.
-const uint32_t REEL_POLL_MS     = 10;     // опрос датчика, пока катушка включена (100 Гц)
-const uint32_t REEL_SEND_MS     = 100;    // как часто отправлять скорость в BLE
-const uint32_t REEL_MAX_MS      = 60000;  // страховка: катушка сама выключается через минуту
-const float    REEL_MIN_DPS     = 100.0f; // гироскоп: вращение медленнее - не считается
-const float    REEL_MIN_ACC_G   = 0.25f;  // акселерометр: движение слабее - не считается
-const float    REEL_GRAVITY_K   = 0.02f;  // как быстро фильтр гравитации догоняет наклон (0.02 = ~0.5 с)
-const float    REEL_SMOOTH      = 0.4f;   // сглаживание разгона: 1 - без сглаживания, меньше - плавнее
-const float    REEL_SMOOTH_DOWN = 0.8f;   // сглаживание остановки: ближе к 1 - скорость падает почти сразу
-const float    REEL_MIN_SPEED   = 0.1f;   // медленнее (об/с) - считаем, что не крутят
-const uint32_t REEL_STOP_MS     = 80;     // гироскоп не видит вращения столько мс - сразу шлём скорость 0
+// Reel (REEL) while playing a fish: see reelUpdate(). Found by experiment.
+const uint32_t REEL_POLL_MS     = 10;     // sensor polling while the reel is on (100 Hz)
+const uint32_t REEL_SEND_MS     = 100;    // how often to send the speed over BLE
+const uint32_t REEL_MAX_MS      = 60000;  // safety: the reel turns itself off after a minute
+const float    REEL_MIN_DPS     = 100.0f; // gyroscope: slower rotation is ignored
+const float    REEL_MIN_ACC_G   = 0.25f;  // accelerometer: weaker motion is ignored
+const float    REEL_GRAVITY_K   = 0.02f;  // how fast the gravity filter follows tilt (0.02 = ~0.5 s)
+const float    REEL_SMOOTH      = 0.4f;   // spin-up smoothing: 1 - none, lower - smoother
+const float    REEL_SMOOTH_DOWN = 0.8f;   // slow-down smoothing: closer to 1 - speed drops almost immediately
+const float    REEL_MIN_SPEED   = 0.1f;   // slower than this (rev/s) - treated as not spinning
+const uint32_t REEL_STOP_MS     = 80;     // gyroscope sees no rotation for this many ms - send speed 0 right away
+const float    REEL_DIR_MIN     = 0.5f;   // less consistent rotation than this (rad, ~30 deg) - direction unknown
+const float    REEL_DIR_KEEP    = 0.5f;   // direction memory between sends: 0.5 = about the last 0.2 s
+const float    REEL_DIR_CLEAR   = 0.5f;   // the main axis must carry this share of the vector, otherwise unknown
 
-// ---------- Доступ к BMI270 через M5.In_I2C ----------
+// ---------- BMI270 access through M5.In_I2C ----------
 const uint8_t  BMI_ADDR = BMI2_I2C_PRIM_ADDR;   // 0x68
 const uint32_t BMI_FREQ = 400000;
 
@@ -174,23 +185,24 @@ static void bmiDelayUs(uint32_t us, void*) {
 bmi2_dev bmi;
 M5Canvas canvas(&M5.Display);
 
-// ---------- Описание событий ----------
+// ---------- Event definitions ----------
 enum EventId : uint8_t {
   EV_TAP1, EV_TAP2, EV_TAP3,
   EV_ANY_MOT, EV_NO_MOT, EV_SIG_MOT,
   EV_HIGH_G, EV_LOW_G, EV_FLAT,
   EV_ORIENT,
-  EV_REEL,          // 10 (раньше этот номер был у STEP)
-  EV_BLOW,          // 11 - игрок дует в микрофон (раньше номер был у ACTIVITY)
+  EV_REEL,          // 10 (this id used to be STEP)
+  EV_BLOW,          // 11 - the player blows into the microphone (this id used to be ACTIVITY)
+  EV_BTN,           // 12 - button: A pressed
   EV_COUNT
 };
 
 struct EventDef {
-  const char* name;      // текст на экране
+  const char* name;      // on-screen text
   uint16_t color;
 };
 
-// Порядок совпадает с EventId и с расположением плиток (3 в ряд)
+// Order matches EventId and the tile layout (3 per row)
 const EventDef EVENTS[EV_COUNT] = {
   { "TAP x1",   TFT_WHITE },
   { "TAP x2",   TFT_GOLD },
@@ -199,15 +211,16 @@ const EventDef EVENTS[EV_COUNT] = {
   { "NO MOT",   TFT_CYAN },
   { "SIG MOT",  TFT_RED },
   { "HIGH-G",   TFT_MAGENTA },
-  { "LOW-G",    0xB81F },   // фиолетовый, светлее TFT_PURPLE
+  { "LOW-G",    0xB81F },   // purple, lighter than TFT_PURPLE
   { "FLAT",     TFT_SKYBLUE },
   { "ORIENT",   TFT_GREENYELLOW },
-  { "REEL",     TFT_GREEN },   // катушка: скорость вращения
-  { "BLOW",     TFT_YELLOW },  // дуют в микрофон: сила
+  { "REEL",     TFT_GREEN },   // reel: spin speed
+  { "BLOW",     TFT_YELLOW },  // blowing into the mic: strength
+  { "BUTTON",   TFT_LIGHTGREY },  // button pressed (the game can use it to pick a spot)
 };
 const int EVENT_COUNT = EV_COUNT;
 
-// Какие функции включаем (ID функций Bosch). Гироскоп не нужен - не включаем.
+// Features to enable (Bosch feature IDs). The gyroscope is not needed here - not enabled.
 struct FeatureDef { uint8_t id; const char* name; };
 const FeatureDef FEATURES[] = {
   { BMI2_ACCEL,         "accel"        },
@@ -224,7 +237,7 @@ const FeatureDef FEATURES[] = {
 };
 const int FEATURE_COUNT = sizeof(FEATURES) / sizeof(FEATURES[0]);
 
-// Какие функции выводим на INT1 (в legacy все тапы идут через общий BMI2_TAP)
+// Features mapped to INT1 (in legacy all taps go through the shared BMI2_TAP)
 const uint8_t INT_MAP[] = {
   BMI2_SIG_MOTION, BMI2_TAP,
   BMI2_ORIENTATION, BMI2_HIGH_G, BMI2_LOW_G, BMI2_FLAT,
@@ -234,33 +247,33 @@ const int INT_MAP_COUNT = sizeof(INT_MAP) / sizeof(INT_MAP[0]);
 
 // Accel: 8G -> 4096 LSB/g
 const float ACC_LSB_PER_G = 4096.0f;
-// Gyro: 2000 dps -> 16.4 LSB/(град/с)
+// Gyro: 2000 dps -> 16.4 LSB/(deg/s)
 const float GYR_LSB_PER_DPS = 16.4f;
 
-// ---------- Связь задач ----------
-QueueHandle_t eventQueue = nullptr;   // imuTask -> loop (экран)
+// ---------- Inter-task communication ----------
+QueueHandle_t eventQueue = nullptr;   // imuTask -> loop (screen)
 QueueHandle_t bleQueue = nullptr;     // imuTask -> bleTask
 std::atomic<uint32_t> i2cErrors{0};
 std::atomic<bool>     bleConnected{false};
-std::atomic<bool>     stickFlat{false};    // стик лежит плашмя (считает imuTask)
+std::atomic<bool>     stickFlat{false};    // stick is lying flat (computed by imuTask)
 std::atomic<int>      batteryPct{-1};
-std::atomic<bool>     reelWanted{false};   // игра просит включить катушку (BLE-команда)
+std::atomic<bool>     reelWanted{false};   // the game asks to enable the reel (BLE command)
 TaskHandle_t imuTaskHandle = nullptr;
 TaskHandle_t bleTaskHandle = nullptr;
 
-// ---------- Плитки событий (только из loop) ----------
-const uint32_t HIGHLIGHT_MS = 1500;   // сколько плитка горит после события
-const uint16_t DIM_TEXT   = 0x4208;   // бледный текст неактивной плитки
-const uint16_t DIM_BORDER = 0x2945;   // бледная рамка неактивной плитки
-const uint16_t BLE_COLOR  = 0x3D7F;   // голубой - BLE подключён
+// ---------- Event tiles (loop only) ----------
+const uint32_t HIGHLIGHT_MS = 1500;   // how long a tile stays lit after an event
+const uint16_t DIM_TEXT   = 0x4208;   // dim text of an inactive tile
+const uint16_t DIM_BORDER = 0x2945;   // dim border of an inactive tile
+const uint16_t BLE_COLOR  = 0x3D7F;   // light blue - BLE connected
 
 uint32_t lastEventTime[EVENT_COUNT] = {0};
 bool     eventSeen[EVENT_COUNT] = {false};
 char     eventDetail[EVENT_COUNT][12] = {};
-uint32_t litMask = 0;      // какие плитки сейчас подсвечены (бит = EventId)
+uint32_t litMask = 0;      // which tiles are lit now (bit = EventId)
 
 bool needRedraw = true;
-int initErrors = 0;        // результат инициализации (для отображения)
+int initErrors = 0;        // init result (for display)
 
 bool     screenOn = true;
 uint32_t lastActivityMs = 0;
@@ -293,7 +306,7 @@ void setScreen(bool on) {
   }
 }
 
-// ---------- Настройка BMI270 ----------
+// ---------- BMI270 setup ----------
 void logTapConfig(const char* title, const bmi2_tap_config& t) {
   LOG("%s: sens_thres=%u max_gest_dur=%u quiet_after=%u wait_timeout=%u axis=%u data_reg_en=%u\n",
       title, t.tap_sens_thres, t.max_gest_dur, t.quite_time_after_gest,
@@ -322,7 +335,7 @@ bool setupTap() {
   r = bmi270_legacy_set_sensor_config(&tap, 1, &bmi);
   if (r != BMI2_OK) { LOG("tap set_config FAILED: %d\n", r); return false; }
 
-  // Читаем обратно, чтобы убедиться, что датчик принял значения
+  // Read back to make sure the sensor accepted the values
   memset(&tap.cfg, 0, sizeof(tap.cfg));
   if (bmi270_legacy_get_sensor_config(&tap, 1, &bmi) == BMI2_OK) logTapConfig("tap applied", tap.cfg.tap_conf);
   return true;
@@ -361,7 +374,7 @@ bool setupHighG() {
   LOG("high-g default: threshold=%u hyst=%u duration=%u\n", c.threshold, c.hysteresis, c.duration);
 
   c.threshold = (uint16_t)(HIGH_G_THRESHOLD_G * 2048 + 0.5f);   // 1 g = 2048
-  c.duration  = HIGH_G_DURATION_MS / 5;                          // в отсчётах 200 Гц
+  c.duration  = HIGH_G_DURATION_MS / 5;                          // in 200 Hz samples
 
   r = bmi270_legacy_set_sensor_config(&h, 1, &bmi);
   if (r != BMI2_OK) { LOG("high-g set_config FAILED: %d\n", r); return false; }
@@ -379,7 +392,7 @@ bool setupImu() {
       (int)M5.getPin(m5::pin_name_t::in_i2c_scl),
       (int)M5.In_I2C.isEnabled());
 
-  // Быстрая проверка, что чип отвечает: CHIP_ID (0x00) должен быть 0x24
+  // Quick check that the chip responds: CHIP_ID (0x00) must be 0x24
   uint8_t chipId = M5.In_I2C.readRegister8(BMI_ADDR, 0x00, BMI_FREQ);
   LOG("BMI270 CHIP_ID = 0x%02X (expected 0x24)\n", chipId);
 
@@ -389,10 +402,10 @@ bool setupImu() {
   bmi.write = bmiWrite;
   bmi.delay_us = bmiDelayUs;
   bmi.intf_ptr = nullptr;
-  bmi.read_write_len = 128;        // кусками по 128 байт грузится конфиг-файл
-  bmi.config_file_ptr = nullptr;   // nullptr = встроенный legacy-конфиг
+  bmi.read_write_len = 128;        // the config file is loaded in 128-byte chunks
+  bmi.config_file_ptr = nullptr;   // nullptr = built-in legacy config
 
-  // Загрузка конфиг-файла (~8 КБ)
+  // Load the config file (~8 KB)
   int tries = 0;
   int8_t r;
   while ((r = bmi270_legacy_init(&bmi)) != BMI2_OK) {
@@ -406,11 +419,11 @@ bool setupImu() {
 
   int failed = 0;
 
-  // Advanced power save выключаем: иначе API включает/выключает его на каждое чтение
+  // Disable advanced power save: otherwise the API toggles it on every read
   r = bmi2_set_adv_power_save(BMI2_DISABLE, &bmi);
   if (r != BMI2_OK) { failed++; LOG("adv_power_save FAILED: %d\n", r); }
 
-  // Акселерометр: 200 Гц (тапам нужна частота повыше), диапазон 8G (запас для high-g)
+  // Accelerometer: 200 Hz (taps need a higher rate), 8G range (headroom for high-g)
   bmi2_sens_config acc;
   acc.type = BMI2_ACCEL;
   r = bmi270_legacy_get_sensor_config(&acc, 1, &bmi);
@@ -423,7 +436,7 @@ bool setupImu() {
   }
   if (r != BMI2_OK) { failed++; LOG("accel config FAILED: %d\n", r); }
 
-  // Гироскоп: настраиваем сразу, а включаем только на время катушки (REEL)
+  // Gyroscope: configured now, enabled only while the reel (REEL) is on
   bmi2_sens_config gyr;
   gyr.type = BMI2_GYRO;
   r = bmi270_legacy_get_sensor_config(&gyr, 1, &bmi);
@@ -437,7 +450,7 @@ bool setupImu() {
   }
   if (r != BMI2_OK) { failed++; LOG("gyro config FAILED: %d\n", r); }
 
-  // Включаем функции и запоминаем, какие не включились
+  // Enable the features and count the ones that failed
   for (int i = 0; i < FEATURE_COUNT; i++) {
     r = bmi270_legacy_sensor_enable(&FEATURES[i].id, 1, &bmi);
     if (r != BMI2_OK) {
@@ -450,13 +463,13 @@ bool setupImu() {
   if (!setupOrient()) failed++;
   if (!setupHighG()) failed++;
 
-  // Настройка вывода прерываний (для регистра статуса)
+  // Interrupt pin setup (for the status register)
   bmi2_int_pin_config pinCfg;
   memset(&pinCfg, 0, sizeof(pinCfg));
   pinCfg.pin_type = BMI2_INT1;
   pinCfg.int_latch = BMI2_INT_LATCH;
   pinCfg.pin_cfg[0].lvl = BMI2_INT_ACTIVE_LOW;
-  pinCfg.pin_cfg[0].od = BMI2_INT_OPEN_DRAIN;   // линия идёт на PM1, не мешаем ей
+  pinCfg.pin_cfg[0].od = BMI2_INT_OPEN_DRAIN;   // the line goes to the PM1, do not drive it
   pinCfg.pin_cfg[0].output_en = BMI2_INT_OUTPUT_ENABLE;
   pinCfg.pin_cfg[0].input_en = BMI2_INT_INPUT_DISABLE;
   r = bmi2_set_int_pin_config(&pinCfg, &bmi);
@@ -481,11 +494,11 @@ bool setupImu() {
   return true;
 }
 
-// ---------- Задача FreeRTOS: опрос BMI270 ----------
-// Частые события (ANY/NO MOTION приходят почти на каждом опросе, пока стик двигается)
-// в BLE отправляются не чаще BLE_THROTTLE_MS. Иначе они забивают BLE-очередь:
-// уведомление уходит примерно раз в интервал соединения (30-50 мс), очередь
-// переполняется, и редкие важные события (ORIENT, TAP, HIGH-G) выбрасываются.
+// ---------- FreeRTOS task: BMI270 polling ----------
+// Frequent events (ANY/NO MOTION arrive on almost every poll while the stick moves)
+// are sent over BLE no more often than BLE_THROTTLE_MS. Otherwise they clog the BLE queue:
+// a notification goes out roughly once per connection interval (30-50 ms), the queue
+// overflows, and rare important events (ORIENT, TAP, HIGH-G) get dropped.
 uint32_t lastBleSentMs[EV_COUNT] = {0};
 uint8_t  bleSeq = 0;
 
@@ -493,22 +506,25 @@ bool isFrequentEvent(uint8_t idx) {
   return idx == EV_ANY_MOT || idx == EV_NO_MOT;
 }
 
-void sendEvent(uint8_t idx, const char* detail = "", uint8_t code = 0, uint16_t extra = 0) {
+void sendEvent(uint8_t idx, const char* detail = "", uint8_t code = 0, uint16_t extra = 0,
+               uint8_t aux = 0, uint16_t diag = 0) {
   ImuEvent ev;
   ev.t = millis();
   ev.idx = idx;
   ev.code = code;
   ev.extra = extra;
+  ev.aux = aux;
+  ev.diag = diag;
   strlcpy(ev.detail, detail, sizeof(ev.detail));
-  if (idx == EV_REEL) {}       // REEL идёт 10 раз в секунду - в лог не пишем
+  if (idx == EV_REEL) {}       // REEL comes 10 times a second - not logged
   else if (detail[0]) LOG("[%lu ms] %s (%s)\n", (unsigned long)ev.t, EVENTS[idx].name, detail);
   else           LOG("[%lu ms] %s\n", (unsigned long)ev.t, EVENTS[idx].name);
   xQueueSend(eventQueue, &ev, 0);
 
   if (isFrequentEvent(idx) && ev.t - lastBleSentMs[idx] < BLE_THROTTLE_MS) return;
   lastBleSentMs[idx] = ev.t;
-  // Номер присваивается здесь, а не при отправке: если событие не влезло в очередь,
-  // на приёмной стороне будет видна дырка в нумерации
+  // The number is assigned here, not when sending: if the event does not fit in the queue,
+  // the receiver will see a gap in the numbering
   ev.seq = bleSeq++;
   if (xQueueSend(bleQueue, &ev, 0) != pdTRUE) {
     LOG("BLE queue full, %s dropped\n", EVENTS[idx].name);
@@ -522,7 +538,7 @@ bool readFeature(bmi2_feat_sensor_data& f, uint8_t type) {
   return false;
 }
 
-// Ускорение в g по осям; false при ошибке
+// Acceleration in g per axis; false on error
 bool readAccel(float& x, float& y, float& z) {
   bmi2_sens_data d;
   memset(&d, 0, sizeof(d));
@@ -533,34 +549,34 @@ bool readAccel(float& x, float& y, float& z) {
   return true;
 }
 
-// |a| в g, или -1 при ошибке
+// |a| in g, or -1 on error
 float readAccelMagnitude() {
   float x, y, z;
   if (!readAccel(x, y, z)) return -1;
   return sqrtf(x * x + y * y + z * z);
 }
 
-// ---------- Катушка (REEL) ----------
-// Как считается вращение: при круговом движении кистью вращаются два вектора -
-// угловая скорость (гироскоп) и ускорение без гравитации (акселерометр).
-// Один круг кистью = один оборот вектора. SpinMeter складывает углы между
-// соседними отсчётами вектора; из двух датчиков берётся тот, что насчитал больше.
-// Направление вращения не важно - складываются только углы.
+// ---------- Reel (REEL) ----------
+// How rotation is measured: when the wrist moves in a circle, two vectors rotate -
+// angular velocity (gyroscope) and acceleration without gravity (accelerometer).
+// One wrist circle = one turn of the vector. SpinMeter sums the angles between
+// consecutive samples of the vector; of the two sensors, the one that counted more wins.
+// Direction does not matter - only angles are summed.
 struct SpinMeter {
-  float px = 0, py = 0, pz = 0, pm = 0;   // прошлый отсчёт и его длина
+  float px = 0, py = 0, pz = 0, pm = 0;   // previous sample and its length
   bool  have = false;
-  float angle = 0;                         // накопленный угол, рад
+  float angle = 0;                         // accumulated angle, rad
 
   void add(float x, float y, float z, float minMag) {
     float m = sqrtf(x * x + y * y + z * z);
-    // Слабый вектор пропускаем и начинаем сравнение заново: при качании туда-сюда
-    // вектор проходит через ноль и меняет знак - это не вращение
+    // Skip a weak vector and restart the comparison: when rocking back and forth
+    // the vector passes through zero and flips sign - that is not rotation
     if (m < minMag) { have = false; return; }
     if (have) {
       float c = (x * px + y * py + z * pz) / (m * pm);
       c = c > 1 ? 1 : (c < -1 ? -1 : c);
       float a = acosf(c);
-      if (a < 1.2f) angle += a;   // больше ~70 градусов за один отсчёт - скачок, не вращение
+      if (a < 1.2f) angle += a;   // more than ~70 degrees per sample - a jump, not rotation
     }
     px = x; py = y; pz = z; pm = m;
     have = true;
@@ -571,13 +587,17 @@ struct ReelState {
   bool     on = false;
   uint32_t startMs = 0, lastSendMs = 0;
   SpinMeter gyro, acc;
-  float    gx = 0, gy = 0, gz = 0;       // гравитация: медленное среднее ускорения
-  float    speed = 0;                    // сглаженная скорость, об/с
-  float    turns = 0;                    // оборотов с включения
+  float    gx = 0, gy = 0, gz = 0;       // gravity: slow average of acceleration
+  float    speed = 0;                    // smoothed speed, rev/s
+  float    turns = 0;                    // turns since enabled
   uint8_t  lastCode = 0;
-  uint32_t lastSpinMs = 0;              // когда гироскоп последний раз видел вращение
+  uint32_t lastSpinMs = 0;              // when the gyroscope last saw rotation
+  float    nx = 0, ny = 0, nz = 0;       // summed rotation, deg (net turn: direction for a twist)
+  float    kx = 0, ky = 0, kz = 0;       // summed cross products of acceleration samples (circle by the accelerometer)
+  float    cx = 0, cy = 0, cz = 0;       // summed cross products of gyro samples (direction for a circle)
+  uint32_t lastDirMs = 0;
 };
-ReelState reel;   // только из imuTask
+ReelState reel;   // imuTask only
 
 bool setGyro(bool on) {
   uint8_t s = BMI2_GYRO;
@@ -592,7 +612,7 @@ void reelStart(uint32_t now) {
   if (!setGyro(true)) { reelWanted = false; return; }
   reel = ReelState();
   reel.on = true;
-  reel.startMs = reel.lastSendMs = now;
+  reel.startMs = reel.lastSendMs = reel.lastDirMs = now;
   float x, y, z;
   if (readAccel(x, y, z)) { reel.gx = x; reel.gy = y; reel.gz = z; }
   LOG("[%lu ms] REEL on\n", (unsigned long)now);
@@ -606,6 +626,66 @@ void reelStop(const char* why) {
   LOG("[%lu ms] REEL off (%s), %.1f turns\n", (unsigned long)millis(), why, reel.turns);
 }
 
+// Spin direction (byte 3 of REEL). Two ways to spin the stick:
+// - twist: it turns around its own axis, angular velocity points one way all the time -
+//   the direction is the sign of the summed rotation (nx, ny, nz);
+// - circle: the wrist draws a circle. If the stick tilts along, angular velocity goes round -
+//   the direction is the axis of that circle: the sum of cross products of consecutive samples
+//   (cx, cy, cz). If the stick moves round without tilting (like a real reel handle), the gyroscope
+//   sees only wobble, but acceleration goes round - the same sum for it (kx, ky, kz, reelTrackAcc).
+// reelDir picks the clearest of the three.
+void reelTrackDir(uint32_t now, float wx, float wy, float wz) {
+  float dt = (now - reel.lastDirMs) / 1000.0f;
+  reel.lastDirMs = now;
+  float m = sqrtf(wx * wx + wy * wy + wz * wz);
+  if (m < REEL_MIN_DPS || dt > 0.1f) return;
+  reel.nx += wx * dt; reel.ny += wy * dt; reel.nz += wz * dt;
+  if (reel.gyro.have) {   // the previous sample was strong too
+    float k = 1.0f / (reel.gyro.pm * m);
+    reel.cx += (reel.gyro.py * wz - reel.gyro.pz * wy) * k;
+    reel.cy += (reel.gyro.pz * wx - reel.gyro.px * wz) * k;
+    reel.cz += (reel.gyro.px * wy - reel.gyro.py * wx) * k;
+  }
+}
+
+// Circle seen by the accelerometer: cross products of consecutive linear acceleration samples
+// (called before reel.acc.add, so reel.acc still holds the previous sample)
+void reelTrackAcc(float lx, float ly, float lz) {
+  float m = sqrtf(lx * lx + ly * ly + lz * lz);
+  if (m < REEL_MIN_ACC_G || !reel.acc.have) return;
+  float k = 1.0f / (reel.acc.pm * m);
+  reel.kx += (reel.acc.py * lz - reel.acc.pz * ly) * k;
+  reel.ky += (reel.acc.pz * lx - reel.acc.px * lz) * k;
+  reel.kz += (reel.acc.px * ly - reel.acc.py * lx) * k;
+}
+
+// Direction code for the packet; older rotation is gradually forgotten
+uint8_t reelDir(uint8_t& cand, uint16_t& diag) {
+  float tw = sqrtf(reel.nx * reel.nx + reel.ny * reel.ny + reel.nz * reel.nz) * (PI / 180);
+  float gc = sqrtf(reel.cx * reel.cx + reel.cy * reel.cy + reel.cz * reel.cz);
+  float ac = sqrtf(reel.kx * reel.kx + reel.ky * reel.ky + reel.kz * reel.kz);
+  // The clearest way wins: all three are "consistent rotation in radians"
+  float v[3];
+  uint8_t mode;
+  float best;
+  if (tw >= gc && tw >= ac) { v[0] = reel.nx; v[1] = reel.ny; v[2] = reel.nz; mode = 0x20; best = tw; }
+  else if (ac >= gc)        { v[0] = reel.kx; v[1] = reel.ky; v[2] = reel.kz; mode = 0x10; best = ac; }
+  else                      { v[0] = reel.cx; v[1] = reel.cy; v[2] = reel.cz; mode = 0;    best = gc; }
+  // Forget the older part, so a change of direction shows up in about 0.2 s
+  reel.nx *= REEL_DIR_KEEP; reel.ny *= REEL_DIR_KEEP; reel.nz *= REEL_DIR_KEEP;
+  reel.cx *= REEL_DIR_KEEP; reel.cy *= REEL_DIR_KEEP; reel.cz *= REEL_DIR_KEEP;
+  reel.kx *= REEL_DIR_KEEP; reel.ky *= REEL_DIR_KEEP; reel.kz *= REEL_DIR_KEEP;
+  int axis = 0;
+  for (int i = 1; i < 3; i++) if (fabsf(v[i]) > fabsf(v[axis])) axis = i;
+  float share = best > 0 ? fabsf(v[axis]) / best : 0;
+  // Diagnostics for the test page: strength of the winning method (rad x40) and main axis share (%)
+  diag = (uint16_t)fminf(255, best * 40) | (uint16_t)(share * 100 + 0.5f) << 8;
+  cand = mode | (v[axis] < 0 ? 0x80 : 0) | axis;   // best guess, sent even when the direction is unknown
+  if (best < REEL_DIR_MIN) return 0;   // too little consistent rotation
+  if (share < REEL_DIR_CLEAR) return 0;   // no clear main axis
+  return 0x40 | cand;
+}
+
 void reelUpdate(uint32_t now) {
   bmi2_sens_data d;
   memset(&d, 0, sizeof(d));
@@ -615,14 +695,16 @@ void reelUpdate(uint32_t now) {
   reel.gx += (ax - reel.gx) * REEL_GRAVITY_K;
   reel.gy += (ay - reel.gy) * REEL_GRAVITY_K;
   reel.gz += (az - reel.gz) * REEL_GRAVITY_K;
+  reelTrackAcc(ax - reel.gx, ay - reel.gy, az - reel.gz);
   reel.acc.add(ax - reel.gx, ay - reel.gy, az - reel.gz, REEL_MIN_ACC_G);
-  reel.gyro.add(d.gyr.x / GYR_LSB_PER_DPS, d.gyr.y / GYR_LSB_PER_DPS, d.gyr.z / GYR_LSB_PER_DPS,
-                REEL_MIN_DPS);
-  if (reel.gyro.have) reel.lastSpinMs = now;   // have = вращение быстрее REEL_MIN_DPS
+  float wx = d.gyr.x / GYR_LSB_PER_DPS, wy = d.gyr.y / GYR_LSB_PER_DPS, wz = d.gyr.z / GYR_LSB_PER_DPS;
+  reelTrackDir(now, wx, wy, wz);
+  reel.gyro.add(wx, wy, wz, REEL_MIN_DPS);
+  if (reel.gyro.have) reel.lastSpinMs = now;   // have = rotation faster than REEL_MIN_DPS
   bool spinning = now - reel.lastSpinMs < REEL_STOP_MS;
 
-  // Остановка: гироскоп сразу видит, что кисть замерла. Шлём 0 немедленно,
-  // не дожидаясь конца окна REEL_SEND_MS, чтобы игра перестала подматывать леску
+  // Stop: the gyroscope sees right away that the wrist froze. Send 0 immediately,
+  // without waiting for the REEL_SEND_MS window to end, so the game stops reeling in the line
   if (!spinning && reel.lastCode) {
     reel.speed = 0;
     reel.lastCode = 0;
@@ -635,23 +717,28 @@ void reelUpdate(uint32_t now) {
   if (now - reel.lastSendMs < REEL_SEND_MS) return;
   float dt = (now - reel.lastSendMs) / 1000.0f;
   reel.lastSendMs = now;
-  // Без вращения по гироскопу обороты не считаем: после остановки акселерометр
-  // ещё какое-то время видит остаток движения, это не вращение
+  // No turns are counted without gyroscope rotation: after a stop the accelerometer
+  // still sees leftover motion for a while, that is not rotation
   float turns = spinning ? fmaxf(reel.gyro.angle, reel.acc.angle) / (2 * PI) : 0;
   reel.gyro.angle = reel.acc.angle = 0;
   reel.turns += turns;
-  // Разгон сглаживаем сильно, а торможение почти нет: перестал крутить - скорость
-  // сразу падает, и игра не продолжает подматывать леску (важно при натяжении)
+  // Spin-up is smoothed a lot, slow-down barely: stop spinning and the speed
+  // drops at once, so the game does not keep reeling in the line (important under tension)
   float raw = turns / dt;
   reel.speed += (raw - reel.speed) * (raw < reel.speed ? REEL_SMOOTH_DOWN : REEL_SMOOTH);
   if (reel.speed < REEL_MIN_SPEED) reel.speed = 0;
 
   uint8_t code = (uint8_t)fminf(255, reel.speed * 10 + 0.5f);
-  if (code == 0 && reel.lastCode == 0) return;   // не крутят - эфир не засоряем
+  if (code == 0 && reel.lastCode == 0) return;   // not spinning - keep the air quiet
   reel.lastCode = code;
   char det[12];
-  snprintf(det, sizeof(det), "%.1f t/s", reel.speed);
-  sendEvent(EV_REEL, code ? det : "STOP", code, (uint16_t)fminf(65535, reel.turns * 100));
+  uint8_t cand = 0;
+  uint16_t diag = 0;
+  uint8_t dir = code ? reelDir(cand, diag) : 0;
+  snprintf(det, sizeof(det), "%.1f %c%c%c", reel.speed, dir ? "XYZ"[dir & 3] : '?',
+           !dir ? ' ' : (dir & 0x80 ? '-' : '+'), !dir ? ' ' : (dir & 0x20 ? 't' : (dir & 0x10 ? 'a' : 'g')));
+  sendEvent(EV_REEL, code ? det : "STOP", code, (uint16_t)fminf(65535, reel.turns * 100),
+            dir ? dir : cand, diag);
 }
 
 void imuTask(void*) {
@@ -663,7 +750,7 @@ void imuTask(void*) {
   static const char* ORIENT_NAMES[]   = { "PORT UP", "LAND L", "PORT DN", "LAND R" };
 
   for (;;) {
-    // Опрос статуса событий (чтение сбрасывает флаги, события защёлкнуты в датчике)
+    // Poll the event status (reading clears the flags, events are latched in the sensor)
     uint16_t status = 0;
     if (bmi2_get_int_status(&status, &bmi) != BMI2_OK) {
       i2cErrors++;
@@ -671,7 +758,7 @@ void imuTask(void*) {
       LOG("[%lu ms] INT_STATUS=0x%04X\n", (unsigned long)millis(), status);
 
       if (status & BMI270_LEGACY_TAP_STATUS_MASK) {
-        // Тип тапа лежит в отдельном регистре
+        // The tap type is in a separate register
         uint8_t tap = 0;
         if (bmi2_get_regs(BMI270_LEGACY_TAP_STATUS_REG, &tap, 1, &bmi) == BMI2_OK) {
           LOG("  tap reg=0x%02X\n", tap);
@@ -686,11 +773,11 @@ void imuTask(void*) {
       if (status & BMI270_LEGACY_ANY_MOT_STATUS_MASK) sendEvent(EV_ANY_MOT);
       if (status & BMI270_LEGACY_NO_MOT_STATUS_MASK)  sendEvent(EV_NO_MOT);
       if (status & BMI270_LEGACY_SIG_MOT_STATUS_MASK) sendEvent(EV_SIG_MOT);
-      // FLAT от датчика срабатывает ненадёжно - используем его только как повод
-      // сразу перепроверить положение (основная проверка ниже, раз в FLAT_CHECK_MS)
+      // The sensor's FLAT is unreliable - use it only as a reason to re-check
+      // the position right away (the main check is below, every FLAT_CHECK_MS)
       if (status & BMI270_LEGACY_FLAT_STATUS_MASK) lastFlatCheck = 0;
 
-      // High-g и low-g делят один бит: различаем по текущему ускорению
+      // High-g and low-g share one bit: tell them apart by the current acceleration
       if (status & BMI270_LEGACY_HIGH_G_STATUS_MASK) {
         float g = readAccelMagnitude();
         if (g >= 0 && g < 0.6f) {
@@ -719,15 +806,15 @@ void imuTask(void*) {
 
     uint32_t now = millis();
 
-    // Катушка: гироскоп работает только по команде игры и пока BLE подключён
+    // Reel: the gyroscope runs only on game request and while BLE is connected
     bool wantReel = reelWanted && bleConnected;
     if (wantReel && !reel.on) reelStart(now);
     else if (reel.on && !wantReel) reelStop("command");
     else if (reel.on && now - reel.startMs >= REEL_MAX_MS) reelStop("timeout");
     if (reel.on) reelUpdate(now);
 
-    // Лежит ли стик плашмя: считаем сами по акселерометру, с гистерезисом.
-    // Событие FLAT (код 1/0) отправляется только при смене состояния.
+    // Is the stick lying flat: computed here from the accelerometer, with hysteresis.
+    // The FLAT event (code 1/0) is sent only when the state changes.
     if (lastFlatCheck == 0 || now - lastFlatCheck >= FLAT_CHECK_MS) {
       lastFlatCheck = now;
       float x, y, z;
@@ -744,7 +831,7 @@ void imuTask(void*) {
     }
 
 #if DEBUG_LOG
-    // Отладка раз в 2 с: видно, что задача жива и шина работает
+    // Debug every 2 s: shows that the task is alive and the bus works
     if (now - lastDebug >= 2000) {
       lastDebug = now;
       bmi2_sens_data d;
@@ -770,39 +857,39 @@ void imuTask(void*) {
   }
 }
 
-// ---------- Микрофон: игрок дует (BLOW) ----------
-// Микрофон включается только по команде игры (ночной костёр) и пока BLE подключён.
-// Звук читается кусками по MIC_CHUNK отсчётов (16 мс), у каждого куска считается громкость -
-// RMS без постоянной составляющей (0..32767). Сам собой отслеживается фон - громкость тишины,
-// поэтому стик работает и в тихой комнате, и на шумной улице.
-// Дуют = громче BLOW_MIN_RMS и в BLOW_RATIO раз громче фона дольше BLOW_START_MS
-// (короткие провалы до BLOW_GAP_MS не мешают). Тогда уходит BLOW с кодом силы 1..255.
-// Стихло на BLOW_END_MS - уходит BLOW с кодом 0. Один выдох = одно событие с силой.
-// Пороги подбираются на устройстве: пока микрофон включён, раз в 0.5 с в Serial
-// печатается громкость (rms) и фон (noise).
-const uint32_t MIC_RATE       = 16000;   // частота, Гц
-const size_t   MIC_CHUNK      = 256;     // отсчётов в куске (16 мс)
-const uint32_t MIC_WARMUP_MS  = 300;     // первые мс после включения не слушаем (щелчок включения)
-const uint32_t MIC_MAX_MS     = 180000;  // страховка: микрофон сам выключается через 3 минуты
-const float    BLOW_MIN_RMS   = 2000;    // тише - точно не дуют
-const float    BLOW_RATIO     = 4.0f;    // во сколько раз громче фона
-const uint32_t BLOW_START_MS  = 120;     // столько мс громко - значит дуют
-const uint32_t BLOW_GAP_MS    = 60;      // провалы короче не прерывают начало выдоха
-const uint32_t BLOW_END_MS    = 200;     // столько мс тихо - выдох закончился
-const float    MIC_NOISE_K    = 0.03f;   // как быстро фон догоняет тишину
+// ---------- Microphone: the player blows (BLOW) ----------
+// The microphone is enabled only on game request (night campfire) and while BLE is connected.
+// Sound is read in chunks of MIC_CHUNK samples (16 ms); each chunk's loudness is computed as
+// RMS without the DC component (0..32767). The background noise level is tracked automatically,
+// so the stick works both in a quiet room and outdoors in the noise.
+// Blowing = louder than BLOW_MIN_RMS and BLOW_RATIO times louder than the noise for longer than BLOW_START_MS
+// (short dips up to BLOW_GAP_MS do not interrupt it). Then a BLOW with strength code 1..255 is sent.
+// Quiet for BLOW_END_MS - a BLOW with code 0 is sent. One blow = one event with a strength.
+// Thresholds are tuned on the device: while the mic is on, loudness (rms) and noise (noise)
+// are printed to Serial every 0.5 s.
+const uint32_t MIC_RATE       = 16000;   // sample rate, Hz
+const size_t   MIC_CHUNK      = 256;     // samples per chunk (16 ms)
+const uint32_t MIC_WARMUP_MS  = 300;     // ignore the first ms after power-on (power-on click)
+const uint32_t MIC_MAX_MS     = 180000;  // safety: the mic turns itself off after 3 minutes
+const float    BLOW_MIN_RMS   = 2000;    // quieter - definitely not blowing
+const float    BLOW_RATIO     = 4.0f;    // how many times louder than the noise
+const uint32_t BLOW_START_MS  = 120;     // loud for this many ms - blowing
+const uint32_t BLOW_GAP_MS    = 60;      // shorter dips do not break the start of a blow
+const uint32_t BLOW_END_MS    = 200;     // quiet for this many ms - the blow is over
+const float    MIC_NOISE_K    = 0.03f;   // how fast the noise level follows silence
 
-std::atomic<bool> micWanted{false};   // игра просит включить микрофон (BLE-команда)
-std::atomic<bool> micOn{false};       // микрофон сейчас работает (ставит micTask)
+std::atomic<bool> micWanted{false};   // the game asks to enable the mic (BLE command)
+std::atomic<bool> micOn{false};       // the mic is running now (set by micTask)
 
 struct BlowState {
-  float    noise = 0;          // фон: громкость тишины
-  float    peak = 0;           // самый громкий кусок текущего выдоха
-  uint32_t loudSince = 0;      // когда стало громко (0 - тихо)
-  uint32_t quietSince = 0;     // когда стало тихо посреди громкого
-  bool     blowing = false;    // BLOW уже отправлен, ждём конца выдоха
+  float    noise = 0;          // noise: loudness of silence
+  float    peak = 0;           // loudest chunk of the current blow
+  uint32_t loudSince = 0;      // when it got loud (0 - quiet)
+  uint32_t quietSince = 0;     // when it got quiet in the middle of a loud stretch
+  bool     blowing = false;    // BLOW already sent, waiting for the blow to end
 } blow;
 
-// Громкость куска: RMS без постоянной составляющей
+// Chunk loudness: RMS without the DC component
 float micRms(const int16_t* s, size_t n) {
   int32_t sum = 0;
   for (size_t i = 0; i < n; i++) sum += s[i];
@@ -814,7 +901,7 @@ float micRms(const int16_t* s, size_t n) {
 void blowStep(uint32_t now, float rms) {
   if (blow.noise <= 0) blow.noise = rms;
   bool loud = rms > BLOW_MIN_RMS && rms > blow.noise * BLOW_RATIO;
-  if (!loud && !blow.blowing) blow.noise += (rms - blow.noise) * MIC_NOISE_K;   // фон учим только по тишине
+  if (!loud && !blow.blowing) blow.noise += (rms - blow.noise) * MIC_NOISE_K;   // learn the noise level only from silence
 
   if (loud) {
     blow.quietSince = 0;
@@ -837,7 +924,7 @@ void blowStep(uint32_t now, float rms) {
     blow.loudSince = 0;
     sendEvent(EV_BLOW, "STOP", 0);
   } else if (!blow.blowing && quiet >= BLOW_GAP_MS) {
-    blow.loudSince = 0;       // это был не выдох, а короткий звук (хлопок, стук)
+    blow.loudSince = 0;       // it was not a blow but a short sound (clap, knock)
   }
 }
 
@@ -854,7 +941,7 @@ void micTask(void*) {
         blow = BlowState();
         cur = 0;
         onSince = now;
-        M5.Mic.record(buf[0], MIC_CHUNK, MIC_RATE);   // два куска в очереди - звук идёт без пропусков
+        M5.Mic.record(buf[0], MIC_CHUNK, MIC_RATE);   // two chunks queued - audio flows without gaps
         M5.Mic.record(buf[1], MIC_CHUNK, MIC_RATE);
         micOn = true;
         LOG("[%lu ms] MIC on\n", (unsigned long)now);
@@ -872,7 +959,7 @@ void micTask(void*) {
     }
     if (!micOn) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
 
-    // Кусок готов, когда в очереди записи остался один (второй ещё пишется)
+    // A chunk is ready when one is left in the record queue (the other is still recording)
     if (M5.Mic.isRecording() >= 2) { vTaskDelay(1); continue; }
     float rms = micRms(buf[cur], MIC_CHUNK);
     M5.Mic.record(buf[cur], MIC_CHUNK, MIC_RATE);
@@ -888,8 +975,8 @@ void micTask(void*) {
   }
 }
 
-// ---------- Задача FreeRTOS: BLE ----------
-// Команды от игры (характеристика BLE_CMD_UUID)
+// ---------- FreeRTOS task: BLE ----------
+// Commands from the game (BLE_CMD_UUID characteristic)
 class CmdCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* c) override {
     if (c->getLength() < 1) return;
@@ -911,24 +998,25 @@ BLECharacteristic* addNotifyCharacteristic(BLEService* svc, BLEUUID uuid) {
   BLECharacteristic* c = svc->createCharacteristic(
       uuid, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
 #if defined(CONFIG_BLUEDROID_ENABLED)
-  c->addDescriptor(new BLE2902());   // в NimBLE дескриптор 0x2902 добавляется сам
+  c->addDescriptor(new BLE2902());   // NimBLE adds the 0x2902 descriptor by itself
 #endif
   return c;
 }
 
-void packEvent(uint8_t* p, uint8_t id, uint8_t code, uint8_t seq, uint32_t t, uint16_t extra = 0) {
+void packEvent(uint8_t* p, uint8_t id, uint8_t code, uint8_t seq, uint32_t t, uint16_t extra = 0,
+               uint8_t aux = 0, uint16_t diag = 0) {
   p[0] = id;
   p[1] = code;
   p[2] = seq;
-  p[3] = 0;
-  memcpy(p + 4, &t, 4);       // ESP32 - little-endian
+  p[3] = aux;
+  memcpy(p + 4, &t, 4);       // ESP32 is little-endian
   memcpy(p + 8, &extra, 2);
-  p[10] = p[11] = 0;          // резерв
+  memcpy(p + 10, &diag, 2);
 }
 
 void bleTask(void*) {
   BLEDevice::init(BLE_NAME);
-  BLEDevice::setPower(ESP_PWR_LVL_N0);     // 0 дБм: хватает на комнату, экономит батарею
+  BLEDevice::setPower(ESP_PWR_LVL_N0);     // 0 dBm: enough for a room, saves battery
 
   BLEServer* server = BLEDevice::createServer();
   server->setCallbacks(new BleServerCallbacks());
@@ -944,7 +1032,7 @@ void bleTask(void*) {
   BLECharacteristic* batChar = addNotifyCharacteristic(batSvc, BLEUUID((uint16_t)0x2A19));
   batSvc->start();
 
-  // Advertising: UUID сервиса в основном пакете (по нему фильтрует браузер), имя - в scan response
+  // Advertising: service UUID in the main packet (the browser filters by it), name in the scan response
   BLEAdvertising* adv = BLEDevice::getAdvertising();
   BLEAdvertisementData advData;
   advData.setFlags(0x06);   // LE General Discoverable, BR/EDR not supported
@@ -953,8 +1041,8 @@ void bleTask(void*) {
   scanData.setName(BLE_NAME);
   adv->setAdvertisementData(advData);
   adv->setScanResponseData(scanData);
-  adv->setMinInterval(480);   // 300 мс (единицы 0.625 мс) - редкий advertising экономит батарею
-  adv->setMaxInterval(800);   // 500 мс
+  adv->setMinInterval(480);   // 300 ms (0.625 ms units) - slow advertising saves battery
+  adv->setMaxInterval(800);   // 500 ms
   BLEDevice::startAdvertising();
   LOG("BLE advertising as \"%s\"\n", BLE_NAME);
 
@@ -966,9 +1054,9 @@ void bleTask(void*) {
   for (;;) {
     ImuEvent ev;
     if (xQueueReceive(bleQueue, &ev, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      // Пока никто не подключён, события просто выбрасываем
+      // While nobody is connected, events are simply dropped
       if (bleConnected) {
-        packEvent(pkt, ev.idx, ev.code, ev.seq, ev.t, ev.extra);
+        packEvent(pkt, ev.idx, ev.code, ev.seq, ev.t, ev.extra, ev.aux, ev.diag);
         evtChar->setValue(pkt, sizeof(pkt));
         evtChar->notify();
       }
@@ -979,9 +1067,9 @@ void bleTask(void*) {
       wasConnected = connected;
       if (connected) {
         LOG("BLE connected\n");
-        // Клиенту нужно время, чтобы подписаться на уведомления
+        // The client needs time to subscribe to notifications
         vTaskDelay(pdMS_TO_TICKS(500));
-        // Код пакета состояния = лежит ли стик сейчас (seq не учитывается)
+        // State packet code = is the stick lying flat now (seq is not counted)
         packEvent(pkt, BLE_STATE_PACKET, stickFlat ? 1 : 0, 0, millis());
         evtChar->setValue(pkt, sizeof(pkt));
         evtChar->notify();
@@ -1008,17 +1096,17 @@ void bleTask(void*) {
   }
 }
 
-// ---------- Отрисовка ----------
+// ---------- Drawing ----------
 void draw() {
   canvas.fillSprite(TFT_BLACK);
   canvas.setFont(&fonts::Font2);
   canvas.setTextDatum(top_left);
 
-  // Заголовок: имя стика
+  // Header: stick name
   canvas.setTextColor(TFT_WHITE);
   canvas.drawString(BLE_NAME, 2, 2);
 
-  // Справа: ошибки, иначе статус BLE и батарея
+  // Right side: errors, otherwise BLE status and battery
   canvas.setTextDatum(top_right);
   if (i2cErrors.load()) {
     canvas.setTextColor(TFT_RED);
@@ -1030,7 +1118,7 @@ void draw() {
     bool c = bleConnected.load();
     int bat = batteryPct.load();
     String s = c ? "BLE OK" : "BLE adv";
-    if (stickFlat.load()) s = "FLAT " + s;   // видно, считает ли стик себя лежащим
+    if (stickFlat.load()) s = "FLAT " + s;   // shows whether the stick thinks it is lying flat
     if (bat >= 0) s += String("  ") + bat + "%";
     canvas.setTextColor(c ? BLE_COLOR : TFT_DARKGREY);
     canvas.drawString(s, canvas.width() - 2, 2);
@@ -1038,7 +1126,7 @@ void draw() {
 
   canvas.drawFastHLine(0, 20, canvas.width(), TFT_DARKGREY);
 
-  // Плитки: сетка 3 колонки, порядок как в EVENTS
+  // Tiles: 3-column grid, same order as EVENTS
   const int COLS = 3;
   const int GAP = 3;
   const int top = 23;
@@ -1072,20 +1160,20 @@ void draw() {
 
 // ---------- Arduino ----------
 void setup() {
-  setCpuFrequencyMhz(80);     // минимум, при котором работает BLE
+  setCpuFrequencyMhz(80);     // the minimum at which BLE works
 
   auto cfg = M5.config();
   cfg.serial_baudrate = 115200;
-  cfg.internal_imu = false;   // IMU будем вести сами через Bosch API
-  cfg.internal_spk = false;   // всё лишнее выключаем ради батареи
-  cfg.internal_mic = true;    // микрофон только настраивается, включает его micTask по команде игры
+  cfg.internal_imu = false;   // the IMU is driven by us through the Bosch API
+  cfg.internal_spk = false;   // everything unneeded is off to save battery
+  cfg.internal_mic = true;    // the mic is only configured; micTask turns it on on game request
   cfg.internal_rtc = false;
-  cfg.output_power = false;   // 5V-выход на разъём не нужен
+  cfg.output_power = false;   // the 5V output on the connector is not needed
   cfg.led_brightness = 0;
-  M5.begin(cfg);              // M5.begin сам вызывает Serial.begin
+  M5.begin(cfg);              // M5.begin calls Serial.begin itself
 
 #if DEBUG_LOG
-  // USB CDC: даём Serial Monitor время подключиться, иначе первые строки теряются
+  // USB CDC: give Serial Monitor time to connect, otherwise the first lines are lost
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 3000) delay(10);
 #endif
@@ -1093,7 +1181,7 @@ void setup() {
   LOG("Board id: %d, CPU %lu MHz\n", (int)M5.getBoard(), (unsigned long)getCpuFrequencyMhz());
 
   M5.BtnA.setHoldThresh(2000);
-  M5.Display.setRotation(1);  // альбомная: 240x135
+  M5.Display.setRotation(1);  // landscape: 240x135
   M5.Display.setBrightness(SCREEN_BRIGHTNESS);
   canvas.createSprite(M5.Display.width(), M5.Display.height());
 
@@ -1116,7 +1204,7 @@ void setup() {
 
   eventQueue = xQueueCreate(16, sizeof(ImuEvent));
   bleQueue = xQueueCreate(64, sizeof(ImuEvent));
-  // loop() крутится на ядре 1, задачи IMU и BLE ставим на ядро 0 (там же стек BLE)
+  // loop() runs on core 1; the IMU and BLE tasks go to core 0 (where the BLE stack lives)
   xTaskCreatePinnedToCore(imuTask, "imuTask", 4096, nullptr, 2, &imuTaskHandle, 0);
   xTaskCreatePinnedToCore(bleTask, "bleTask", 8192, nullptr, 1, &bleTaskHandle, 0);
   xTaskCreatePinnedToCore(micTask, "micTask", 4096, nullptr, 1, nullptr, 0);
@@ -1134,20 +1222,22 @@ void loop() {
     M5.Display.setBrightness(0);
     M5.Power.powerOff();
   }
-  // Любая кнопка включает экран ещё на SCREEN_TIMEOUT_MS
+  // Button A goes to the game as BUTTON (some players pick the cast spot with it instead of a double tap)
+  if (M5.BtnA.wasPressed()) sendEvent(EV_BTN, "A", 1);
+  // Any button keeps the screen on for another SCREEN_TIMEOUT_MS
   if (M5.BtnA.wasPressed() || M5.BtnB.wasPressed() || M5.BtnPWR.wasPressed()) {
     lastActivityMs = now;
     setScreen(true);
   }
 
-  // События только обновляют плитки, экран не будят (экономия батареи)
+  // Events only update the tiles and do not wake the screen (saves battery)
   ImuEvent ev;
   while (xQueueReceive(eventQueue, &ev, 0) == pdTRUE) addEvent(ev);
 
   if (screenOn && now - lastActivityMs >= SCREEN_TIMEOUT_MS) setScreen(false);
 
-  // Перерисовка, когда плитка зажглась/погасла,
-  // плюс раз в секунду (статус BLE, батарея, ошибки). Погасший экран не рисуем.
+  // Redraw when a tile lights up/fades,
+  // plus once a second (BLE status, battery, errors). A dark screen is not drawn.
   static uint32_t lastDraw = 0;
   uint32_t mask = calcLitMask(now);
   if (mask != litMask) {
@@ -1159,5 +1249,5 @@ void loop() {
     draw();
   }
 
-  delay(screenOn ? 10 : 50);   // с погасшим экраном loop() просыпается реже
+  delay(screenOn ? 10 : 50);   // with the screen off loop() wakes up less often
 }

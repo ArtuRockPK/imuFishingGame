@@ -6,7 +6,8 @@
 //  flat  - стик лежит экраном вверх (FLAT с кодом 1). Сейчас только для отладки (клавиша G).
 // =====================================================================
 
-const stick = { flat: false, still: false, stillSince: 0, lastMotion: 0 };
+// reelDir - куда крутят катушку: 1 по часовой, -1 против часовой, 0 непонятно (настройка в setup.js; игра пока не использует)
+const stick = { flat: false, still: false, stillSince: 0, lastMotion: 0, reelDir: 0 };
 
 // Вызывается на каждое событие от стика, до игровой логики
 function updateStickState(id, code) {

@@ -4,11 +4,16 @@
 //
 //  Когда наступает ночь (daytime.js, onDayPart('night')), после текущей попытки
 //  камера показывает кострище на берегу острова: камни, шалаш из поленьев, тлеют угли.
+//   0. chop, split - сначала рубим дрова рывками (wood.js).
 //   1. kindle - дуть в стик (микрофон, событие BLOW): каждый выдох раздувает огонь,
 //      пока дуешь - пламя вспыхивает. Нужно CAMPFIRE.blowsMin..blowsMax выдохов.
 //   2. lit    - костёр разгорелся, освещает всё вокруг.
 //   3. cook   - над огнём рыба на вертеле: крутить стик кистью, как катушку (REEL),
 //      CAMPFIRE.cookMin..cookMax секунд - рыба поворачивается и румянится.
+//      Скорость - в зелёной зоне (CAMPFIRE.speedMin..speedMax). Медленнее дольше slowTime -
+//      «пережарил», быстрее дольше fastTime - «недожарил»: рыба падает в костёр (fall),
+//      и на вертел идёт следующая рыба из улова (game.catches, с последней пойманной).
+//      Улов кончился - рыбак остаётся голодным, сразу done.
 //   4. eat    - рыбак ест: рыба исчезает по кусочку, остаётся скелет.
 //   5. done   - назад к рыбалке. Костёр так и горит рядом с рыбаком до утра (CAMPFIRE.outHour).
 //  Тройной тап на шаге 1 - зажечь костёр сразу (если микрофон не работает).
@@ -16,14 +21,14 @@
 // =====================================================================
 
 const Z = 2;                          // крупность костра: во сколько раз ближе камера (1 - далеко)
-const FIRE_X = 160, FIRE_Y = 150;     // центр кострища в сцене
-const SPIT_Y = FIRE_Y - 76;           // высота вертела (языки пламени лижут рыбу)
+const FIRE_X = 160, FIRE_Y = 136;     // центр кострища в сцене
+const SPIT_Y = 74;                    // высота вертела (языки пламени лижут рыбу)
 const SPIT_S = 6;                     // увеличение рыбы на вертеле
 const SHORE_Y = 60;                   // где кончается вода и начинается берег
 const ISLAND_FIRE = { x: ISLAND.cx - 19, y: ISLAND.cy - 3 };   // костёр у рыбака после ивента
 
 const fire = {
-  phase: 'kindle',            // 'kindle' - раздуваем, 'lit' - разгорелся, 'cook' - вертел, 'eat' - едим, 'done'
+  phase: 'kindle',            // 'chop', 'split' - рубим дрова (wood.js), 'kindle' - раздуваем, 'lit' - разгорелся, 'cook' - вертел, 'eat' - едим, 'done'
   phaseT: 0,                  // когда началась фаза (game.stateTime)
   blows: 0, need: 0,          // сколько раз подули / сколько нужно
   level: 0,                   // сила огня 0..1 (плавно догоняет цель)
@@ -34,7 +39,12 @@ const fire = {
   reelSpeed: 0, reelAt: 0,    // скорость вращения стика, об/с, и когда пришла
   sizzleAt: 0,
   bites: 0,                   // сколько раз откусили (0..4)
-  fish: null,                 // какая рыба на вертеле (последняя пойманная)
+  fish: null,                 // какая рыба на вертеле
+  queue: [],                  // рыбы из улова для вертела: первая - на вертеле, дальше - запасные
+  slow: 0, fast: 0,           // сколько секунд крутят медленно / быстро (за зелёной зоной)
+  showSpeed: 0,               // скорость для стрелки на шкале (сглаженная)
+  fail: '',                   // почему рыба упала: 'burnt' - пережарил, 'raw' - недожарил
+  fallHit: false,             // упавшая рыба уже долетела до огня
   sparks: [], smoke: [], crumbs: [],
 };
 
@@ -63,11 +73,19 @@ function startCampfire() {
     level: 0, flare: 0, blowing: false,
     cook: 0, cookNeed: rand(CAMPFIRE.cookMin, CAMPFIRE.cookMax), spin: 0,
     reelSpeed: 0, reelAt: 0, sizzleAt: 0, bites: 0,
-    fish: game.fish || FISH_TYPES[0],
+    queue: game.catches.length ? game.catches.map(c => c.fish).reverse() : [game.fish || FISH_TYPES[0]],
+    slow: 0, fast: 0, showSpeed: 0, fail: '', fallHit: false,
     sparks: [], smoke: [], crumbs: [],
   });
+  say(T('msg_wood_start'), C.accent);
+  startWood();                  // wood.js: сначала рубим дрова
+}
+
+// Дрова готовы (wood.js): раздуваем костёр
+function startKindle() {
+  fire.fish = fire.queue[0];
   setFirePhase('kindle');
-  say(T('msg_night'), C.accent);
+  say(T('msg_wood_done'), C.good);
   setMic(true);                 // controller.js: стик включает микрофон
 }
 
@@ -78,6 +96,7 @@ function stopCampfire() {
 }
 
 function campfireEvent(id, code) {
+  if (fire.phase === 'chop' || fire.phase === 'split') { woodEvent(id); return; }
   if (id === EV.BLOW) {
     if (!code) { fire.blowing = false; return; }
     if (fire.blowing || fire.phase !== 'kindle') return;
@@ -125,6 +144,7 @@ function updateParticles(list, dt, gravity) {
 }
 
 function updateCampfire(dt, t) {
+  if (fire.phase === 'chop' || fire.phase === 'split') { updateWood(dt, t); return; }
   const pt = t - fire.phaseT;
 
   // Сила огня: пока раздуваем - по числу выдохов, потом в полную силу
@@ -149,8 +169,27 @@ function updateCampfire(dt, t) {
   } else if (fire.phase === 'cook') {
     // Скорость не приходила полсекунды (пакеты потерялись) - считаем, что не крутят
     if (inputMode === 'ble' && t - fire.reelAt > 0.5) fire.reelSpeed = 0;
-    if (fire.reelSpeed >= FISH.reelMinSpeed) {
-      fire.cook += dt;
+    const sp = fire.reelSpeed;
+    // Стрелка спидометра с инерцией: рывки и потерянные пакеты стика её не дёргают.
+    // Зона считается по стрелке - что видит игрок, то и засчитывается
+    fire.showSpeed += (sp - fire.showSpeed) * Math.min(1, dt * CAMPFIRE.needle);
+    const v = fire.showSpeed;
+    if (pt > CAMPFIRE.grace) {         // рыба на рогатинах, игрок успел начать крутить
+      if (v < CAMPFIRE.speedMin) {       // медленно - бок над огнём подгорает
+        fire.slow += dt;
+        fire.fast = Math.max(0, fire.fast - dt * 2);
+      } else if (v > CAMPFIRE.speedMax) {    // быстро - не прожаривается и слетает
+        fire.fast += dt;
+        fire.slow = Math.max(0, fire.slow - dt * 2);
+      } else {                           // в зелёной зоне жарится, а запас быстро восстанавливается
+        fire.cook += dt;
+        fire.slow = Math.max(0, fire.slow - dt * 1.5);
+        fire.fast = Math.max(0, fire.fast - dt * 1.5);
+      }
+      if (fire.slow >= CAMPFIRE.slowTime) { dropFish('burnt'); return; }
+      if (fire.fast >= CAMPFIRE.fastTime) { dropFish('raw'); return; }
+    }
+    if (sp >= FISH.reelMinSpeed) {
       fire.spin += fire.reelSpeed * Math.PI * 2 * dt * 0.5;
       if (t >= fire.sizzleAt) {          // шкворчит
         noiseHit(0.15, { vol: 0.05, type: 'highpass', freq: rand(3000, 5000) });
@@ -165,6 +204,14 @@ function updateCampfire(dt, t) {
       say(T('msg_cooked'), C.good);
       setFirePhase('eat');
     }
+  } else if (fire.phase === 'fall') {
+    if (!fire.fallHit && pt >= 0.35) {  // рыба долетела до огня
+      fire.fallHit = true;
+      fire.flare = 1;
+      addSparks(25);
+      noiseHit(0.4, { vol: 0.2, type: 'lowpass', freq: 700 });
+    }
+    if (pt >= CAMPFIRE.fallTime) nextFish();
   } else if (fire.phase === 'eat') {
     // Четыре укуса по ходу CAMPFIRE.eatTime, крошки летят на землю
     const bites = Math.max(0, Math.min(4, Math.floor((pt - 0.6) / ((CAMPFIRE.eatTime - 0.8) / 4)) + 1));
@@ -182,6 +229,33 @@ function updateCampfire(dt, t) {
   } else if (fire.phase === 'done' && pt >= 2) {
     game.campfireLit = true;    // костёр остаётся у рыбака до утра
     finishCast();               // game.js: обратно к рыбалке
+  }
+}
+
+// Рыба упала с вертела в огонь: пережарил (медленно) или недожарил (быстро)
+function dropFish(kind) {
+  fire.fail = kind;
+  fire.fallHit = false;
+  setFirePhase('fall');
+  sfx.lost();
+  say(T(kind === 'burnt' ? 'msg_cook_burnt' : 'msg_cook_raw'), C.bad);
+}
+
+// Следующая рыба из улова на вертел; улов кончился - рыбак остаётся голодным
+function nextFish() {
+  fire.queue.shift();
+  fire.cook = 0; fire.slow = 0; fire.fast = 0; fire.spin = 0;
+  if (fire.queue.length) {
+    fire.fish = fire.queue[0];
+    fire.cookNeed = rand(CAMPFIRE.cookMin, CAMPFIRE.cookMax);
+    fire.reelAt = game.stateTime;
+    setFirePhase('cook');
+    say(T('msg_cook_next'), C.accent);
+  } else {
+    setReel(false);
+    fire.reelSpeed = 0;
+    setFirePhase('done');
+    say(T('msg_cook_none'), C.bad);
   }
 }
 
@@ -219,43 +293,100 @@ function drawEmbers(t, glow) {
   }
 }
 
-// Поленья шалашом: от камней к верхушке
-const LOGS = [[-26, 5], [24, 6], [-14, -5], [15, -4], [2, 8]];
+// Колотое полено (спрайт): светлая древесина с волокнами, слева обугленный конец (в огне),
+// справа светлый торец с кольцами. Рисуется повёрнутым, без сглаживания - остаётся пиксельным
+const PIT_LOG = (() => {
+  const c = document.createElement('canvas');
+  c.width = 40; c.height = 12;
+  const g = c.getContext('2d');
+  const p = (x, y, w, h, col) => { g.fillStyle = col; g.fillRect(x, y, w, h); };
+  p(0, 0, 40, 12, '#2c1808');                            // контур
+  p(1, 1, 38, 3, '#e8b070');                             // освещённая грань
+  p(1, 4, 38, 4, '#c88850');
+  p(1, 8, 38, 3, '#8c5428');                             // теневая грань
+  for (let x = 3; x < 34; x += 7) { p(x, 2, 4, 1, '#c08850'); p(x + 3, 5, 5, 1, '#a06c38'); p(x + 1, 9, 4, 1, '#6c3c18'); }
+  p(1, 1, 5, 10, '#3c2414');                             // обугленный конец
+  p(6, 2, 2, 8, '#5c3418');
+  p(34, 1, 5, 10, '#f0c890');                            // торец
+  p(35, 4, 3, 4, '#d0a060');
+  p(36, 5, 1, 2, '#a87038');
+  return c;
+})();
+
+// Куча поленьев крест-накрест: [внутренний (обугленный) конец x, y, наружный конец x, y, толщина].
+// Сначала нижний слой и дальние, потом верхние и ближние. Задние (back) - до передних камней
+const LOGS_BACK = [
+  [30, -24, -50, -16, 14], [-34, -26, 46, -14, 14], [8, -30, -24, -6, 12], [-6, -30, 28, -4, 12],
+  [-60, -6, 12, -22, 14], [62, -4, -10, -24, 14],
+];
+const LOGS_FRONT = [
+  [16, -16, -56, 14, 16], [-16, -16, 58, 12, 16], [-30, 2, 40, 0, 14],
+  [6, -14, -14, 26, 14], [-4, -12, 22, 26, 14], [0, -22, -36, 4, 12], [2, -22, 38, 6, 12],
+];
 function drawLogs(front) {
-  const top = { x: FIRE_X, y: FIRE_Y - 30 * Z };
-  for (const [dx, dy] of LOGS) {
-    if ((dy > 0) !== front) continue;
-    const bx = FIRE_X + dx * Z, by = FIRE_Y + dy * Z, tx = top.x + Math.sign(dx) * 2 * Z;
-    for (let o = -2; o <= 2; o++) line(bx + o, by, tx + o, top.y, '#5c3400');
-    line(bx - 1, by, tx - 1, top.y, '#9c6020');
-    line(bx, by, tx, top.y, '#9c6020');
+  ctx.imageSmoothingEnabled = false;
+  for (const [x0, y0, x1, y1, th] of front ? LOGS_FRONT : LOGS_BACK) {
+    const a = Math.atan2(y1 - y0, x1 - x0), len = Math.hypot(x1 - x0, y1 - y0);
+    ctx.save();
+    ctx.translate(Math.round(FIRE_X + x0), Math.round(FIRE_Y + y0));
+    ctx.rotate(a);
+    ctx.drawImage(PIT_LOG, 0, -th / 2, len, th);
+    ctx.restore();
   }
 }
 
-// Камни вокруг кострища: задние рисуются до поленьев, передние - после
-function drawStones(front) {
-  for (let i = 0; i < 16; i++) {
-    const a = i / 16 * Math.PI * 2;
-    if ((Math.sin(a) > 0) !== front) continue;
-    const x = FIRE_X + Math.cos(a) * 40 * Z - 3 * Z, y = FIRE_Y + Math.sin(a) * 12 * Z - 2 * Z;
-    rect(x, y, 7 * Z, 4 * Z, '#8c8c8c');
-    rect(x + Z, y, 5 * Z, Z, '#bcbcbc');
-    rect(x, y + 3 * Z, 7 * Z, Z, '#5c5c5c');
+// Камень: округлый, с тёмным контуром; сверху тёплый блик от огня, снизу тень
+function drawStone(x, y, w, h) {
+  x = Math.round(x); y = Math.round(y);
+  for (let j = 0; j < h; j++) {
+    const ins = j === 0 || j === h - 1 ? 3 : j === 1 || j === h - 2 ? 1 : 0;
+    rect(x + ins, y + j, w - ins * 2, 1, '#201810');
+    if (j === 0 || j === h - 1) continue;
+    const ins2 = ins + 1 + (j === 1 || j === h - 2 ? 1 : 0);
+    const col = j <= 2 ? '#c8a080' : j >= h - 3 ? '#5c564c' : '#8c8478';
+    rect(x + ins2, y + j, w - ins2 * 2, 1, col);
   }
+  rect(x + 4, y + 2, 3, 1, '#e8c8a0');                   // блик
+}
+
+// Каменный круг: задние камни рисуются до поленьев, передние - после (ближние крупнее)
+const PIT_RX = 86, PIT_RY = 30, PIT_STONES = 18;
+function drawStones(front) {
+  const list = [];
+  for (let i = 0; i < PIT_STONES; i++) {
+    const a = (i + 0.5) / PIT_STONES * Math.PI * 2;
+    if ((Math.sin(a) > 0) !== front) continue;
+    const k = 0.85 + 0.15 * Math.sin(a);
+    const w = Math.round((21 + (i * 7) % 4) * k), h = Math.round((14 + (i * 5) % 3) * k);
+    list.push([FIRE_X + Math.cos(a) * PIT_RX - w / 2, FIRE_Y + Math.sin(a) * PIT_RY - h / 2, w, h]);
+  }
+  list.sort((p, q) => p[1] - q[1]);
+  for (const s of list) drawStone(...s);
+}
+
+// Выжженная земля вокруг кострища и зола внутри круга
+function drawPitGround() {
+  fillEllipseAt(FIRE_X, FIRE_Y + 3, 136, 46, '#6c9418');         // подсохшая трава
+  fillEllipseAt(FIRE_X, FIRE_Y + 2, 124, 42, '#c0700c');         // опалённая земля
+  fillEllipseAt(FIRE_X, FIRE_Y + 1, 110, 38, '#9c5c10');
+  fillEllipseAt(FIRE_X, FIRE_Y, 100, 36, '#2c6c10');             // зелёная кайма у камней
+  fillEllipseAt(FIRE_X, FIRE_Y, 80, 27, '#3c2414');              // зола
+  fillEllipseAt(FIRE_X, FIRE_Y - 1, 60, 19, '#2c1808');
 }
 
 // Рыба, которая готовится: цвета плавно уходят в золотисто-коричневый
 const cookedCache = {};
-function cookedFishCanvas(type, k) {
-  const key = type.name + ':' + Math.round(k * 10);
+function cookedFishCanvas(type, k, char = 0) {
+  const key = type.name + ':' + Math.round(k * 10) + ':' + Math.round(char * 10);
   if (cookedCache[key]) return cookedCache[key];
   const c = document.createElement('canvas');
   c.width = FISH_SPRITE[0].length;
   c.height = FISH_SPRITE.length;
   const g = c.getContext('2d');
   const q = Math.round(k * 10) / 10 * 0.85;
-  const pal = { b: mixColor(type.body, '#c07828', q), s: mixColor(type.stripe, '#6c3810', q),
-                f: mixColor(type.fin, '#5c3010', q), k: '#000000' };
+  const ch = Math.round(char * 10) / 10;                            // подгорает - темнеет до угля
+  const pal = { b: mixColor(mixColor(type.body, '#c07828', q), '#201008', ch), s: mixColor(mixColor(type.stripe, '#6c3810', q), '#100800', ch),
+                f: mixColor(mixColor(type.fin, '#5c3010', q), '#100800', ch), k: '#000000' };
   FISH_SPRITE.forEach((row, y) => [...row].forEach((ch, x) => {
     if (ch === '.') return;
     g.fillStyle = pal[ch];
@@ -281,31 +412,38 @@ function drawBones() {
 function drawSpit(t, st) {
   const pt = st - fire.phaseT;
   // Рогатины по бокам и вертел. На правом конце - ручка, она крутится вместе с рыбой
-  for (const sx of [FIRE_X - 100, FIRE_X + 100]) {
-    rect(sx - 2, SPIT_Y + 3, 4, FIRE_Y - SPIT_Y + 8, '#5c3400');
+  for (const sx of [FIRE_X - 106, FIRE_X + 106]) {
+    rect(sx - 2, SPIT_Y + 3, 4, FIRE_Y - SPIT_Y + 22, '#5c3400');   // стоят за камнями, на опалённой земле
     for (let o = -1; o <= 1; o++) {
       line(sx + o, SPIT_Y + 5, sx - 7 + o, SPIT_Y - 7, '#5c3400');
       line(sx + o, SPIT_Y + 5, sx + 7 + o, SPIT_Y - 7, '#5c3400');
     }
   }
   const drop = fire.phase === 'cook' ? Math.max(0, 1 - pt / 0.4) * 90 : 0;   // рыба опускается на рогатины
+  const fall = fire.phase === 'fall' ? Math.min(1, pt / 0.35) ** 2 * (FIRE_Y - SPIT_Y - 6) : 0;   // падает в огонь
   const y = SPIT_Y - drop;
   rect(FIRE_X - 112, y - 1, 224, 3, '#c8a060');
   const hx = FIRE_X + 112, hy = Math.round(Math.cos(fire.spin) * 10);
   rect(hx, Math.min(y, y + hy), 3, Math.abs(hy) + 1, '#c8a060');
   rect(hx - 2, y + hy - 2, 7, 5, '#7c4800');
 
+  if (fire.phase === 'done' && !fire.bites) return;                // улов кончился - вертел пустой
+  if (fire.phase === 'fall' && pt > 0.95) return;                    // упавшая рыба сгорела
   if (fire.phase === 'eat' || fire.phase === 'done') drawBones();
   const fw = FISH_SPRITE[0].length, fh = FISH_SPRITE.length;
   const cut = fire.phase === 'eat' || fire.phase === 'done' ? Math.min(fw, fire.bites * 3) : 0;
   if (cut >= fw) return;
-  const src = cookedFishCanvas(fire.fish, fire.cook / fire.cookNeed);
+  const char = fire.phase === 'fall' ? (fire.fail === 'burnt' ? 1 : 0.2 + Math.max(0, pt - 0.35))
+             : fire.phase === 'cook' ? 0.8 * fire.slow / CAMPFIRE.slowTime : 0;
+  const src = cookedFishCanvas(fire.fish, fire.cook / fire.cookNeed, Math.min(1, char));
   // Поворот на вертеле: рыба сплющивается по высоте и переворачивается
   const c = Math.cos(fire.spin);
   const h = Math.max(2, Math.round(fh * SPIT_S * Math.abs(c)));
   ctx.imageSmoothingEnabled = false;
   ctx.save();
-  ctx.translate(FIRE_X, Math.round(y));
+  ctx.translate(FIRE_X, Math.round(y + fall));
+  if (fire.phase === 'fall') ctx.rotate(Math.min(1, pt / 0.35) * 0.5);
+  else if (fire.phase === 'cook' && fire.fast > 0) ctx.translate(Math.sin(st * 40) * fire.fast / CAMPFIRE.fastTime * 4, 0);   // болтается на вертеле
   if (c < 0) ctx.scale(1, -1);
   ctx.drawImage(src, cut, 0, fw - cut, fh, Math.round(-fw * SPIT_S / 2 + cut * SPIT_S), -Math.round(h / 2), (fw - cut) * SPIT_S, h);
   ctx.restore();
@@ -326,6 +464,7 @@ const SHORE_TUFTS = [];
 })();
 
 function drawCampfireScene(L, t, dt, st) {
+  if (fire.phase === 'chop' || fire.phase === 'split') { drawWoodScene(L, t, dt); return; }
   // Тот берег, озеро и наш берег. Озеро запоминаем как воду - в нём отражается небо и луна
   ctx.clearRect(0, 0, W, H);
   drawFarShore();
@@ -339,7 +478,7 @@ function drawCampfireScene(L, t, dt, st) {
   }
 
   // Кострище: зола, камни, поленья, вертел с рыбой, дым
-  fillEllipseAt(FIRE_X, FIRE_Y, 36 * Z, 10 * Z, '#3c2c1c');
+  drawPitGround();
   drawStones(false);
   drawLogs(false);
   drawLogs(true);
@@ -358,7 +497,7 @@ function drawCampfireScene(L, t, dt, st) {
   drawSkyBehind(L, t, dt);
   drawEmbers(t, Math.max(0.35, fire.level, fire.flare));
   const strength = Math.min(1.2, fire.level * 0.9 + fire.flare * 0.35);
-  drawFlames(FIRE_X, FIRE_Y + 2 * Z, 42 * Z * strength, (6 + 22 * fire.level) * Z, t, 3);
+  drawFlames(FIRE_X, FIRE_Y - 4, 42 * Z * strength, (5 + 14 * fire.level) * Z, t, 3);   // из середины кучи, дрова по краям видно
   for (const p of fire.sparks) {
     const k = p.age / p.life;
     rect(p.x, p.y, k < 0.5 ? 3 : 2, k < 0.5 ? 3 : 2, k < 0.3 ? '#fce040' : k < 0.7 ? '#fc9800' : '#c83000');
@@ -375,7 +514,60 @@ function drawCampfireScene(L, t, dt, st) {
 
   // Шкалы: сколько ещё дуть / сколько ещё крутить
   if (fire.phase === 'kindle') drawBar(FIRE_X - 40, 17, 80, fire.blows / fire.need, C.accent);
-  if (fire.phase === 'cook') drawBar(FIRE_X - 40, 17, 80, fire.cook / fire.cookNeed, C.barFill);
+  if (fire.phase === 'cook') {
+    drawBar(FIRE_X - 40, 17, 80, fire.cook / fire.cookNeed, C.barFill);
+    drawCookSpeed(t);
+  }
+}
+
+// Спидометр вертела (слева вверху): полукруг от 0 до max об/с. Слева красное - медленно (подгорает),
+// в середине зелёная зона с белой отметкой «крути так», справа синее - быстро (не прожарится).
+// Под ним полоска запаса: насколько рыба близка к «пережарил» (красная) или «недожарил» (синяя)
+const COOK_DIAL = { x: 48, y: 60, r: 34, w: 7, max: 4 };
+function drawCookSpeed(t) {
+  const { x, y, r, w, max } = COOK_DIAL;
+  const angleOf = (v) => Math.PI * (1 - Math.min(1, Math.max(0, v / max)));   // 0 об/с - слева, max - справа
+  const a0 = angleOf(CAMPFIRE.speedMin), a1 = angleOf(CAMPFIRE.speedMax);
+  const v = fire.showSpeed;
+  const inGreen = v >= CAMPFIRE.speedMin && v <= CAMPFIRE.speedMax;
+  // Подложка и цветная дуга
+  for (let dy = -r - 2; dy <= 0; dy++) {
+    for (let dx = -r - 2; dx <= r + 2; dx++) {
+      const d = Math.hypot(dx, dy);
+      if (d > r + 2) continue;
+      let col = '#101010';
+      if (d >= r - w && d <= r) {
+        const a = Math.atan2(-dy, dx);
+        col = a > a0 ? '#e84000' : a >= a1 ? (inGreen && Math.floor(t * 6) % 2 ? '#a8f8a0' : C.good) : '#3cbcfc';
+      } else if (d > r) col = '#000000';
+      px(x + dx, y + dy, col);
+    }
+  }
+  // Деления через каждые пол-оборота в секунду
+  for (let s = 0; s <= max; s += 0.5) {
+    const a = angleOf(s), long = s % 1 === 0;
+    for (let k = r - w - (long ? 5 : 3); k < r - w; k++) px(x + Math.round(Math.cos(a) * k), y - Math.round(Math.sin(a) * k), '#d8d8d8');
+  }
+  // Отметка «крути с такой скоростью» - середина зелёной зоны, белый треугольник снаружи дуги
+  const am = angleOf((CAMPFIRE.speedMin + CAMPFIRE.speedMax) / 2);
+  for (let i = 0; i < 4; i++) {
+    const k = r + 2 + i, hw = i;
+    const cx = x + Math.cos(am) * k, cy = y - Math.sin(am) * k;
+    rect(Math.round(cx - hw), Math.round(cy), hw * 2 + 1, 1, '#ffffff');
+  }
+  // Стрелка
+  const an = angleOf(v), tip = r - 2;
+  const nx = x + Math.cos(an) * tip, ny = y - Math.sin(an) * tip;
+  line(x, y, nx, ny, '#ffffff');
+  line(x + 1, y, nx + 1, ny, '#ffffff');
+  rect(x - 3, y - 3, 7, 4, '#c8c8c8');
+  rect(x - 2, y - 2, 5, 2, '#f83800');
+  // Запас до провала
+  const bw = r * 2;
+  rect(x - r - 1, y + 3, bw + 2, 5, '#000000');
+  const kSlow = fire.slow / CAMPFIRE.slowTime, kFast = fire.fast / CAMPFIRE.fastTime;
+  if (kSlow > 0.01) rect(x - r, y + 4, Math.round(bw * Math.min(1, kSlow)), 3, Math.floor(t * 8) % 2 && kSlow > 0.6 ? '#fce040' : '#e84000');
+  else if (kFast > 0.01) rect(x - r, y + 4, Math.round(bw * Math.min(1, kFast)), 3, Math.floor(t * 8) % 2 && kFast > 0.6 ? '#ffffff' : '#3cbcfc');
 }
 
 // ---------- Костёр у рыбака (после ивента, до утра) ----------

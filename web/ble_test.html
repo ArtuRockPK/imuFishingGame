@@ -69,6 +69,16 @@
   .log .sys { color: var(--muted); }
   .log .warn { color: var(--err); }
   .hint { color: var(--muted); font-size: 13px; }
+  .rec { margin-top: 24px; }
+  .rec h2 { font-size: 16px; margin: 0 0 6px; }
+  .rec-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+  .rec-buttons button.active { background: var(--err); color: #fff; border-color: transparent; }
+  #recState { margin-bottom: 8px; }
+  #recText {
+    width: 100%; height: 320px; resize: vertical;
+    background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 12px; font: 12px/1.5 ui-monospace, Consolas, monospace;
+  }
   #unsupported { display: none; background: #3a1d1d; border: 1px solid #6b2a2a; border-radius: 10px; padding: 12px; margin-bottom: 16px; }
 </style>
 </head>
@@ -97,6 +107,7 @@
     <div class="stat"><div class="label">Время стика</div><div class="value" id="uptime">—</div></div>
     <div class="stat"><div class="label">Катушка, об/с</div><div class="value" id="reelSpeed">—</div></div>
     <div class="stat"><div class="label">Оборотов</div><div class="value" id="reelTurns">—</div></div>
+    <div class="stat"><div class="label">Куда крутят</div><div class="value" id="reelDir">—</div></div>
     <div class="stat"><div class="label">Выдохов (BLOW)</div><div class="value" id="blows">0</div></div>
   </section>
 
@@ -104,6 +115,22 @@
 
   <div class="log" id="log"></div>
   <p class="hint">Плитка горит 1.5 с после события, цифра в углу — сколько раз событие пришло.</p>
+
+  <section class="rec">
+    <h2>Проверка направления катушки</h2>
+    <p class="hint">Включите катушку. Нажмите «по часовой», крутите 10–15 секунд, нажмите «Стоп».
+      Потом то же самое «против часовой». Можно записать несколько заходов. Потом «Скопировать»
+      и вставьте текст в чат. В поле можно дописать свои заметки (как держали контроллер и т.п.).</p>
+    <div class="rec-buttons">
+      <button id="recCw" class="secondary">Записать: по часовой</button>
+      <button id="recCcw" class="secondary">Записать: против часовой</button>
+      <button id="recStop" class="secondary" disabled>Стоп</button>
+      <button id="recCopy">Скопировать</button>
+      <button id="recClear" class="secondary">Очистить запись</button>
+    </div>
+    <div class="hint" id="recState">запись не идёт</div>
+    <textarea id="recText" spellcheck="false" placeholder="Здесь появится лог проверки"></textarea>
+  </section>
 </main>
 
 <script>
@@ -128,6 +155,7 @@ const EVENTS = [
   { name: 'ORIENT',   color: '#b4ff2f' },
   { name: 'REEL',     color: '#00e070' },
   { name: 'BLOW',     color: '#ffe000' },
+  { name: 'BUTTON',   color: '#c8c8c8' },
 ];
 const ORIENT_NAMES = ['PORT UP', 'LAND L', 'PORT DN', 'LAND R'];
 const EV_HIGH_G = 6, EV_FLAT = 8, EV_ORIENT = 9, EV_REEL = 10, EV_BLOW = 11;
@@ -139,6 +167,14 @@ function decodeDetail(id, code) {
   if (id === EV_REEL)     return code ? (code / 10).toFixed(1) + ' об/с' : 'стоп';
   if (id === EV_BLOW)     return code ? 'сила ' + code : 'конец';
   return '';
+}
+
+// Направление катушки (байт 3 у REEL): биты 0-1 ось, бит 4 - круг по акселерометру,
+// бит 5 - твист (ни того ни другого - круг по гироскопу), бит 6 - направление известно, бит 7 - минус
+function decodeReelDir(aux) {
+  if (!(aux & 0x40)) return '?';
+  const how = aux & 0x20 ? 'твист' : (aux & 0x10 ? 'круг, акс.' : 'круг, гиро');
+  return 'XYZ'[aux & 3] + (aux & 0x80 ? '-' : '+') + ' (' + how + ')';
 }
 
 // ---------- UI ----------
@@ -182,7 +218,7 @@ function setStatus(text, cls) {
   el.className = 'value' + (cls ? ' ' + cls : '');
 }
 
-let packets = 0, lost = 0, lastSeq = null;
+let packets = 0, lost = 0, lastSeq = null, lastReelDir = '';
 
 function resetCounters() {
   packets = 0; lost = 0; lastSeq = null;
@@ -223,14 +259,113 @@ function onEvent(e) {
   const detail = decodeDetail(id, code);
   lightTile(id, detail);
   if (id === EV_REEL) {
-    // REEL приходит 10 раз в секунду - в лог пишем только остановку
+    // REEL приходит 10 раз в секунду - в лог пишем только остановку и смену направления
+    const dir = code ? decodeReelDir(dv.getUint8(3)) : '—';
     $('reelSpeed').textContent = (code / 10).toFixed(1);
     $('reelTurns').textContent = (extra / 100).toFixed(1);
+    $('reelDir').textContent = dir;
+    recAdd(t, code, extra, dv.getUint8(3), dv.getUint16(10, true));
+    tiles[id].el.querySelector('.detail').textContent = code ? detail + ' ' + dir : detail;
+    if (code && dir !== lastReelDir) log(`катушка: ${dir}`);
+    lastReelDir = dir;
     if (code) return;
   }
   if (id === EV_BLOW && code) $('blows').textContent = ++blowCount;
   log(`#${String(seq).padStart(3)}  t=${String(t).padStart(8)}  ${EVENTS[id].name}${detail ? ' (' + detail + ')' : ''}`);
 }
+
+// ---------- Проверка направления катушки ----------
+// Заход = все пакеты REEL между «Записать» и «Стоп». В текст идёт сводка по каждому заходу
+// (сколько раз какое направление) и сырые пакеты: время, об/с, обороты, байт направления.
+let recTake = null;
+const recTakes = [];
+const REC_LABEL = { cw: 'ПО ЧАСОВОЙ', ccw: 'ПРОТИВ ЧАСОВОЙ' };
+
+function recStart(kind) {
+  if (recTake) recStop();
+  recTake = { kind, n: recTakes.length + 1, rows: [] };
+  $('recCw').classList.toggle('active', kind === 'cw');
+  $('recCcw').classList.toggle('active', kind === 'ccw');
+  $('recStop').disabled = false;
+  recShowState();
+}
+
+function recStop() {
+  if (!recTake) return;
+  recTakes.push(recTake);
+  recTake = null;
+  $('recCw').classList.remove('active');
+  $('recCcw').classList.remove('active');
+  $('recStop').disabled = true;
+  recShowState();
+  recRender();
+}
+
+// Диагностика (байты 10..11 у REEL, новые прошивки): сила лучшего способа (рад x40) и доля главной оси (%).
+// Без бита 6 в байте 3 всё равно лежит лучшая догадка - по ней видно, почему направление «?»
+function reelGuess(aux) {
+  const how = aux & 0x20 ? 'твист' : (aux & 0x10 ? 'акс.' : 'гиро');
+  return 'XYZ'[aux & 3] + (aux & 0x80 ? '-' : '+') + ' ' + how;
+}
+
+function recAdd(t, code, extra, aux, diag) {
+  if (!recTake) return;
+  recTake.rows.push({ t, code, extra, aux, str: (diag & 0xFF) / 40, share: diag >> 8 });
+  recShowState();
+}
+
+function recShowState() {
+  $('recState').textContent = recTake
+    ? `идёт запись #${recTake.n}: ${REC_LABEL[recTake.kind]}, пакетов REEL: ${recTake.rows.length}`
+    : `запись не идёт, заходов: ${recTakes.length}`;
+}
+
+function recSummary(take) {
+  const moving = take.rows.filter((r) => r.code);
+  const counts = {};
+  moving.forEach((r) => { const d = decodeReelDir(r.aux); counts[d] = (counts[d] || 0) + 1; });
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const avg = moving.length ? moving.reduce((s, r) => s + r.code, 0) / moving.length / 10 : 0;
+  const lines = [`=== Заход #${take.n}: ${REC_LABEL[take.kind]} ===`,
+    `пакетов: ${take.rows.length}, с вращением: ${moving.length}, средняя скорость: ${avg.toFixed(2)} об/с`];
+  sorted.forEach(([d, c]) => lines.push(`  ${d.padEnd(18)} ${String(c).padStart(4)}  ${(100 * c / moving.length).toFixed(0)}%`));
+  // Догадки (даже когда направление «?») со средней силой и долей оси
+  const g = {};
+  moving.forEach((r) => {
+    const k = reelGuess(r.aux);
+    g[k] = g[k] || { n: 0, str: 0, share: 0 };
+    g[k].n++; g[k].str += r.str; g[k].share += r.share;
+  });
+  lines.push('  догадки (сила рад / доля оси %):');
+  Object.entries(g).sort((a, b) => b[1].n - a[1].n).forEach(([k, v]) => lines.push(
+    `    ${k.padEnd(12)} ${String(v.n).padStart(4)}  ${(100 * v.n / moving.length).toFixed(0).padStart(3)}%` +
+    `   сила ${(v.str / v.n).toFixed(2)}   ось ${(v.share / v.n).toFixed(0)}%`));
+  return lines;
+}
+
+function recRender() {
+  const out = ['Лог проверки направления катушки', '', '--- Сводка ---'];
+  recTakes.forEach((tk) => out.push(...recSummary(tk)));
+  out.push('', '--- Сырые пакеты (t мс, об/с, обороты, байт направления hex, сила рад, доля оси %, расшифровка / догадка) ---');
+  recTakes.forEach((tk) => {
+    out.push(`# заход ${tk.n} ${REC_LABEL[tk.kind]}`);
+    tk.rows.forEach((r) => out.push(`${r.t} ${(r.code / 10).toFixed(1)} ${(r.extra / 100).toFixed(2)} ` +
+      `${r.aux.toString(16).padStart(2, '0')} ${r.str.toFixed(2)} ${r.share} ` +
+      `${r.code ? decodeReelDir(r.aux) + ' / ' + reelGuess(r.aux) : 'стоп'}`));
+  });
+  const notes = $('recText').value.split('\n--- Заметки ---\n')[1];
+  $('recText').value = out.join('\n') + '\n--- Заметки ---\n' + (notes !== undefined ? notes : '');
+}
+
+$('recCw').onclick = () => recStart('cw');
+$('recCcw').onclick = () => recStart('ccw');
+$('recStop').onclick = recStop;
+$('recClear').onclick = () => { if (recTake) recStop(); recTakes.length = 0; $('recText').value = ''; recShowState(); };
+$('recCopy').onclick = async () => {
+  if (recTake) recStop();
+  try { await navigator.clipboard.writeText($('recText').value); $('recState').textContent = 'скопировано — вставьте в чат'; }
+  catch (_) { $('recText').select(); $('recState').textContent = 'не удалось скопировать — выделил текст, нажмите Ctrl+C'; }
+};
 
 function onBattery(e) {
   $('battery').textContent = e.target.value.getUint8(0) + '%';
