@@ -14,9 +14,9 @@ the microphone to light a campfire. The controller sends its events to the game 
 
 **Flash a controller in a couple of clicks** with the M5Burner web flasher (Chrome or Edge, USB cable):
 
-- Game firmware for **StickCPlus2** — https://burner.m5stack.com/EVRRG7
-- Game firmware for **CardputerADV** — https://burner.m5stack.com/K482U9
-- Game firmware for **StickS3** — https://burner.m5stack.com/share/firmware/X65WLT
+- Game firmware for **StickCPlus2** — https://burner.m5stack.com/QKD7CU
+- Game firmware for **CardputerADV** — https://burner.m5stack.com/MC6SGT
+- Game firmware for **StickS3** — https://burner.m5stack.com/M6MGHS
 
 ### What's inside
 
@@ -61,9 +61,9 @@ and open `http://localhost:8000/fishing/`. Without a controller you can play wit
 
 **Прошить контроллер за пару кликов** можно через веб-прошивальщик M5Burner (Chrome или Edge, USB-кабель):
 
-- Прошивка для игры на **StickCPlus2** — https://burner.m5stack.com/EVRRG7
-- Прошивка для игры на **CardputerADV** — https://burner.m5stack.com/K482U9
-- Прошивка для игры на **StickS3** — https://burner.m5stack.com/share/firmware/X65WLT
+- Прошивка для игры на **StickCPlus2** — https://burner.m5stack.com/QKD7CU
+- Прошивка для игры на **CardputerADV** — https://burner.m5stack.com/MC6SGT
+- Прошивка для игры на **StickS3** — https://burner.m5stack.com/M6MGHS
 
 ### Что в репозитории
 

@@ -69,9 +69,9 @@ function showLanguageMenu() {
 // Новые функции игры (например, кнопка вместо двойного тапа) работают только со свежей прошивкой.
 // Ссылки - веб-прошивальщик M5Burner (те же, что в README): открываются в новой вкладке
 const FIRMWARE_LINKS = [
-  { name: 'StickS3',        url: 'https://burner.m5stack.com/share/firmware/X65WLT' },
-  { name: 'StickC Plus2',   url: 'https://burner.m5stack.com/EVRRG7' },
-  { name: 'Cardputer ADV',  url: 'https://burner.m5stack.com/K482U9' },
+  { name: 'StickS3',        url: 'https://burner.m5stack.com/M6MGHS' },
+  { name: 'StickC Plus2',   url: 'https://burner.m5stack.com/QKD7CU' },
+  { name: 'Cardputer ADV',  url: 'https://burner.m5stack.com/MC6SGT' },
 ];
 
 function showFirmwareMenu() {
