@@ -7,6 +7,7 @@
 //      неподвижной черте, справа от неё на земле зелёная метка. Рывок, когда конец бревна
 //      в зелёной метке, - отрублено полено. Рано - топор бьёт мимо, полена нет.
 //      Прозевал (конец проехал метку) - бревно откатывается назад, ещё попытка.
+//      Отрубил - остаток бревна откатывается в начальное положение и едет заново.
 //      Нужно WOOD.chunks поленьев, бревно с каждым поленом едет быстрее.
 //   2. split - вид сбоку: полено стоит на пеньке, над ней плавает маркер (куда упадёт топор).
 //      Рывок, когда маркер в зелёной зоне по центру полена, - полено раскалывается на дрова.
@@ -20,12 +21,14 @@ const WOOD_AXE_X = 214;                     // по какой черте бьё
 const STUMP_X = 160, STUMP_Y = 140;         // пенёк (вид сбоку): центр и верх
 const BLOCK_W = 20, BLOCK_H = 36;           // полено на пеньке: полуширина и высота
 const SPLIT_RANGE = 52;                     // насколько маркер уходит от центра, пикселей
+const WOOD_START_X = 80;                    // где конец бревна в начале каждой попытки
 
 const wood = {
   cut: 0,                     // сколько поленьев отрублено
   split: 0,                   // сколько расколото
   endX: 0, len: 0,            // правый конец бревна и его длина
-  back: false,                // прозевали: бревно откатывается назад
+  back: false,                // бревно откатывается назад (прозевали или отрубили полено)
+  backTo: 0,                  // докуда откатывается конец бревна
   speed: 0,                   // скорость бревна, пикселей в секунду
   pieces: [],                 // отрубленные поленья, катятся вниз: { x0, x1, y, fromX, fromY, toX, toY, t }
   m: 0, mPhase: 0,            // маркер над поленом: -1..1 и фаза качания
@@ -44,7 +47,7 @@ function startWood() {
     m: 0, mPhase: 0, axeT: -10, axeX: 0, axeHit: '', blockT: 0,
     halves: [], chips: [], doneT: -1,
   });
-  wood.endX = 80;                            // бревно уже лежит, конец подъезжает к топору
+  wood.endX = WOOD_START_X;                  // бревно уже лежит, конец подъезжает к топору
   setFirePhase('chop');
 }
 
@@ -80,6 +83,9 @@ function chopLog() {
   wood.len -= d;
   wood.endX = WOOD_AXE_X;
   wood.speed += WOOD.logSpeedUp;
+  // Остаток бревна откатывается в начальное положение и снова едет к топору
+  wood.back = true;
+  wood.backTo = WOOD_START_X;
   if (wood.cut >= WOOD.chunks) {
     wood.doneT = game.stateTime;
     say(T('msg_wood_blocks'), C.good);
@@ -131,13 +137,14 @@ function updateWood(dt, t) {
       }
       return;
     }
-    if (wood.back) {                          // прозевали - откатываем, чтобы конец снова подъехал
+    if (wood.back) {                          // откатываем, чтобы конец снова подъехал
       wood.endX -= 160 * dt;
-      if (wood.endX <= WOOD_AXE_X - 40) wood.back = false;
+      if (wood.endX <= wood.backTo) { wood.endX = wood.backTo; wood.back = false; }
     } else if (pt > 0.5) {
       wood.endX += wood.speed * dt;
       if (wood.endX - WOOD_AXE_X > WOOD.zoneMax + 6) {
         wood.back = true;
+        wood.backTo = WOOD_AXE_X - 40;
         sfx.lost();
         say(T('msg_wood_late'), C.bad);
       }
